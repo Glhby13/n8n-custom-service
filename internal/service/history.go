@@ -15,6 +15,8 @@ type GitVersion struct {
 	ShortSHA     string
 	Subject      string
 	Author       string
+	Owner        string // from N8n-Workflow-Owner trailer
+	Publisher    string // from N8n-Workflow-Publisher trailer
 	Time         time.Time
 	N8nVersionID string // from the N8n-Version-Id trailer; "" for commits written before it existed
 	Description  string // commit body without trailers (the Publish description), may be empty
@@ -55,7 +57,11 @@ func toGitVersion(c gitlab.Commit) GitVersion {
 	}
 	return GitVersion{
 		SHA: strings.ToLower(c.ID), ShortSHA: short, Subject: subject, Author: c.AuthorName,
-		Time: c.CreatedAt.UTC(), N8nVersionID: TrailerVersionID(c.Message), Description: commitBody(c.Message),
+		Owner:        TrailerValue(c.Message, WorkflowOwnerTrailer),
+		Publisher:    TrailerValue(c.Message, WorkflowPublisherTrailer),
+		Time:         c.CreatedAt.UTC(),
+		N8nVersionID: TrailerVersionID(c.Message),
+		Description:  commitBody(c.Message),
 	}
 }
 
@@ -150,7 +156,7 @@ func commitBody(message string) string {
 	var keep []string
 	for _, line := range strings.Split(body, "\n") {
 		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, VersionTrailer+":") || strings.HasPrefix(t, VersionNameTrailer+":") || strings.HasPrefix(t, WorkflowTrailer+":") {
+		if strings.HasPrefix(t, "N8n-") {
 			continue
 		}
 		keep = append(keep, line)

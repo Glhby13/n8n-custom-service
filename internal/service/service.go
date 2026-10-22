@@ -22,6 +22,8 @@ import (
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/metrics"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/n8n"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/workflow"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Options configures a Service.
@@ -29,6 +31,7 @@ type Options struct {
 	N8N              n8n.Client
 	Git              gitlab.Store
 	Mapper           *Mapper
+	DB               *pgxpool.Pool
 	Branch           string
 	RedactKeys       []string
 	MaxCommitRetries int
@@ -222,8 +225,25 @@ func (s *Service) Publish(ctx context.Context, id, trigger string) (res *Publish
 	if nodes == nil {
 		return nil, newErr(KindUpstream, "n8n activeVersion has no nodes", nil)
 	}
+	verName, verDesc := s.versionMeta(ctx, id, av.VersionID)
+	pubName, pubEmail := s.resolvePublisher(ctx, id, av.VersionID)
+	publisher := pubName
+	if pubEmail != "" && !strings.Contains(publisher, pubEmail) {
+		if publisher != "" {
+			publisher = fmt.Sprintf("%s <%s>", publisher, pubEmail)
+		} else {
+			publisher = pubEmail
+		}
+	}
+	if publisher == "" {
+		publisher = verName
+	}
+	if publisher == "" {
+		publisher = owner.Project
+	}
+
 	def, err := workflow.BuildDefinition(workflow.Source{
-		ID: id, Name: name, Nodes: nodes, Connections: conns,
+		ID: id, Name: name, Owner: owner.Project, Publisher: publisher, Nodes: nodes, Connections: conns,
 		NodeGroups: av.NodeGroups, Settings: wf.Settings, Meta: wf.Meta, Tags: wf.Tags,
 	}, s.o.RedactKeys)
 	if err != nil {
@@ -245,8 +265,7 @@ func (s *Service) Publish(ctx context.Context, id, trigger string) (res *Publish
 	unlock := s.lock(owner.Repository, id)
 	defer unlock()
 
-	verName, verDesc := s.versionMeta(ctx, id, av.VersionID)
-	msg := commitMessage(name, id, verName, verDesc, av.VersionID)
+	msg := commitMessage(name, id, verName, verDesc, av.VersionID, owner.Project, publisher)
 	prev, hadPrev := s.SyncedHead(id)
 	republished := !hadPrev || prev.PublishedVersionID != av.VersionID
 	for attempt := 1; attempt <= s.o.MaxCommitRetries; attempt++ {
@@ -272,7 +291,7 @@ func (s *Service) Publish(ctx context.Context, id, trigger string) (res *Publish
 		commitMsg, formatOnly := msg, gerr == nil && workflow.SameContent(file.Content, def)
 		if formatOnly {
 			// Only the way the file is written changed (formatVersion bump): label it so.
-			commitMsg = commitMessage(name, id, verName, workflow.MigrationDescription(), av.VersionID)
+			commitMsg = commitMessage(name, id, verName, workflow.MigrationDescription(), av.VersionID, owner.Project, publisher)
 		}
 		sha, werr := s.o.Git.WriteFile(ctx, owner.Repository, s.o.Branch, path, content, commitMsg, head)
 		if werr == nil {
@@ -295,29 +314,48 @@ func (s *Service) Publish(ctx context.Context, id, trigger string) (res *Publish
 	return nil, newErr(KindConflict, "GitLab kept reporting concurrent modifications; nothing was overwritten", nil)
 }
 
-// VersionTrailer is the commit-body trailer that records which n8n version (activeVersion.versionId)
-// a commit holds. It lets the n8n history panel match Git commits to n8n versions.
-const VersionTrailer = "N8n-Version-Id"
+// Trailers for commit body
+const (
+	VersionTrailer           = "N8n-Version-Id"
+	VersionNameTrailer       = "N8n-Version-Name"
+	WorkflowTrailer          = "N8n-Workflow-Id"
+	WorkflowOwnerTrailer     = "N8n-Workflow-Owner"
+	WorkflowPublisherTrailer = "N8n-Workflow-Publisher"
+)
 
-// TrailerVersionID extracts the N8n-Version-Id trailer from a full commit message ("" if absent).
-func TrailerVersionID(message string) string {
+// resolvePublisher queries n8n_db workflow_publish_history to find who activated the version.
+func (s *Service) resolvePublisher(ctx context.Context, workflowID, versionID string) (name, email string) {
+	if s.o.DB == nil || versionID == "" {
+		return "", ""
+	}
+	const q = `
+		SELECT COALESCE(NULLIF(TRIM(u."firstName" || ' ' || u."lastName"), ''), u.email, ''), COALESCE(u.email, '')
+		FROM workflow_publish_history h
+		LEFT JOIN "user" u ON u.id = h."userId"
+		WHERE h."workflowId" = $1 AND h."versionId" = $2 AND h.event = 'activated'
+		ORDER BY h.id DESC LIMIT 1;
+	`
+	_ = s.o.DB.QueryRow(ctx, q, workflowID, versionID).Scan(&name, &email)
+	return name, email
+}
+
+// TrailerValue extracts a specific trailer from a full commit message ("" if absent).
+func TrailerValue(message, trailer string) string {
 	for _, line := range strings.Split(message, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), VersionTrailer+":"); ok {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), trailer+":"); ok {
 			return strings.TrimSpace(v)
 		}
 	}
 	return ""
 }
 
-// VersionNameTrailer records the version name given in n8n's Publish dialog.
-const VersionNameTrailer = "N8n-Version-Name"
+// TrailerVersionID extracts the N8n-Version-Id trailer from a full commit message ("" if absent).
+func TrailerVersionID(message string) string {
+	return TrailerValue(message, VersionTrailer)
+}
 
-// WorkflowTrailer records the n8n workflow id (the file is <id>.json; the subject is only the name).
-const WorkflowTrailer = "N8n-Workflow-Id"
-
-// commitMessage builds "<workflow name>", then the Publish description (if any), then the trailers
-// N8n-Version-Name, N8n-Version-Id and N8n-Workflow-Id.
-func commitMessage(name, id, versionName, description, versionID string) string {
+// commitMessage builds "<workflow name>", description, and trailers.
+func commitMessage(name, id, versionName, description, versionID, owner, publisher string) string {
 	name = oneLine(name, 120)
 	if name == "" {
 		name = id
@@ -335,6 +373,12 @@ func commitMessage(name, id, versionName, description, versionID string) string 
 		b.WriteString("\n" + VersionNameTrailer + ": " + vn)
 	}
 	b.WriteString("\n" + VersionTrailer + ": " + versionID)
+	if o := strings.TrimSpace(owner); o != "" {
+		b.WriteString("\n" + WorkflowOwnerTrailer + ": " + oneLine(o, 200))
+	}
+	if p := strings.TrimSpace(publisher); p != "" {
+		b.WriteString("\n" + WorkflowPublisherTrailer + ": " + oneLine(p, 200))
+	}
 	b.WriteString("\n" + WorkflowTrailer + ": " + id)
 	return b.String()
 }

@@ -46,6 +46,7 @@ type Config struct {
 	PollInterval  time.Duration
 	SyncOnStartup bool
 
+	DefaultRepository string
 	Mappings          []Mapping
 	RedactParamKeys   []string
 	MaxBodyBytes      int64
@@ -171,6 +172,8 @@ func Load(getenv Getenv) (*Config, error) {
 		c.GitLabBaseURL = "https://api.github.com"
 	}
 
+	c.DefaultRepository = str("DEFAULT_REPOSITORY", str("GIT_REPOSITORY", ""))
+
 	for _, k := range strings.Split(getenv("REDACT_PARAMETER_KEYS"), ",") {
 		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
 			c.RedactParamKeys = append(c.RedactParamKeys, k)
@@ -253,8 +256,11 @@ func (c *Config) validate() []error {
 	if len(c.ServiceAPIToken) > 0 && len(c.ServiceAPIToken) < 16 {
 		errs = append(errs, errors.New("SERVICE_API_TOKEN is too short (min 16 characters)"))
 	}
-	if len(c.Mappings) == 0 {
-		errs = append(errs, errors.New("OWNER_MAPPINGS must contain at least one mapping"))
+	if c.DefaultRepository == "" && len(c.Mappings) == 0 {
+		errs = append(errs, errors.New("DEFAULT_REPOSITORY or OWNER_MAPPINGS must be specified"))
+	}
+	if c.DefaultRepository != "" && (!repoPattern.MatchString(c.DefaultRepository) || strings.Contains(c.DefaultRepository, "..")) {
+		errs = append(errs, fmt.Errorf("DEFAULT_REPOSITORY is not a valid repository path: %q", c.DefaultRepository))
 	}
 	seen := map[string]bool{}
 	for i, m := range c.Mappings {

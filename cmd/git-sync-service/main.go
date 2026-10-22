@@ -1,4 +1,4 @@
-// Command n8n-git-service versions published n8n workflows in GitLab and restores them.
+// Command git-sync-service synchronises published n8n workflows to Git and serves history diffs.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/audit"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/config"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/github"
@@ -19,11 +20,9 @@ import (
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/metrics"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/n8n"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/service"
-	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/shareproxy"
-	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/team"
 )
 
-const serviceName = "n8n-git-service"
+const serviceName = "git-sync-service"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
@@ -42,6 +41,26 @@ func run() error {
 	}
 	log := httpx.NewLogger(os.Stdout, cfg.LogLevel, serviceName)
 	m := metrics.New()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	var dbPool *pgxpool.Pool
+	if cfg.DBURL != "" {
+		pcfg, perr := pgxpool.ParseConfig(cfg.DBURL)
+		if perr == nil {
+			pcfg.MaxConns = 4
+			pcfg.MinConns = 1
+			pool, perr2 := pgxpool.NewWithConfig(ctx, pcfg)
+			if perr2 != nil {
+				log.Warn("failed to connect to n8n database for publisher lookup", "err", perr2)
+			} else {
+				defer pool.Close()
+				dbPool = pool
+				log.Info("connected to n8n database for publisher lookup")
+			}
+		}
+	}
 
 	n8nClient := n8n.NewHTTPClient(n8n.Options{
 		BaseURL: cfg.N8NBaseURL, APIKey: cfg.N8NAPIKey, Timeout: cfg.HTTPTimeout,
@@ -64,29 +83,11 @@ func run() error {
 	}
 
 	svc := service.New(service.Options{
-		N8N: n8nClient, Git: gitClient, Mapper: service.NewMapper(cfg.Mappings),
-		Branch: cfg.GitLabBranch, RedactKeys: cfg.RedactParamKeys,
+		N8N: n8nClient, Git: gitClient, Mapper: service.NewMapper(cfg.Mappings, cfg.DefaultRepository),
+		DB: dbPool, Branch: cfg.GitLabBranch, RedactKeys: cfg.RedactParamKeys,
 		MaxCommitRetries: cfg.MaxCommitRetries, MaxHistory: cfg.MaxHistoryCommits,
 		MaxWorkflowBytes: cfg.MaxWorkflowBytes, Log: log, Audit: audit.New(log), Metrics: m,
 	})
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if len(cfg.Teams) > 0 && cfg.DBURL != "" {
-		teamReconciler, terr := team.New(ctx, team.Options{
-			DBURL:    cfg.DBURL,
-			Teams:    cfg.Teams,
-			Interval: cfg.TeamReconcileInterval,
-			Log:      log,
-		})
-		if terr != nil {
-			log.Warn("failed to initialize team reconciler", "err", terr)
-		} else {
-			defer teamReconciler.Close()
-			go teamReconciler.Run(ctx)
-		}
-	}
 
 	var poller *service.Poller
 	if cfg.PollEnabled {
@@ -98,9 +99,13 @@ func run() error {
 	for _, mp := range cfg.Mappings {
 		repos = append(repos, mp.N8NUser+" -> "+mp.Repository)
 	}
-	log.Info("starting", "n8n_base_url", cfg.N8NBaseURL, "gitlab_base_url", cfg.GitLabBaseURL,
-		"branch", cfg.GitLabBranch, "poll_enabled", cfg.PollEnabled, "poll_interval", cfg.PollInterval.String(),
-		"sync_on_startup", cfg.SyncOnStartup, "history_proxy", cfg.HistoryProxyEnabled, "mappings", repos)
+	if cfg.DefaultRepository != "" {
+		repos = append(repos, "* (default) -> "+cfg.DefaultRepository)
+	}
+	log.Info("starting", "service", serviceName, "n8n_base_url", cfg.N8NBaseURL, "git_provider", cfg.GitProvider,
+		"branch", cfg.GitLabBranch, "default_repo", cfg.DefaultRepository, "poll_enabled", cfg.PollEnabled,
+		"poll_interval", cfg.PollInterval.String(), "sync_on_startup", cfg.SyncOnStartup,
+		"history_proxy", cfg.HistoryProxyEnabled, "mappings", repos)
 
 	var history http.Handler
 	if cfg.HistoryProxyEnabled {
@@ -114,27 +119,10 @@ func run() error {
 		history = hp
 	}
 
-	var shareHandler http.Handler
-	if cfg.DBURL != "" {
-		sp, err := shareproxy.New(ctx, shareproxy.Options{
-			N8NBaseURL: cfg.N8NBaseURL,
-			CookieName: cfg.N8NAuthCookieName,
-			DBURL:      cfg.DBURL,
-			Timeout:    cfg.HTTPTimeout,
-			Log:        log,
-		})
-		if err != nil {
-			log.Warn("failed to initialize share proxy", "err", err)
-		} else {
-			defer sp.Close()
-			shareHandler = sp
-		}
-	}
-
 	h := service.NewHandler(service.HandlerOptions{
 		Service: svc, Poller: poller, Log: log, APIToken: cfg.ServiceAPIToken,
 		MaxBodyBytes: cfg.MaxBodyBytes, RateLimitRPS: cfg.RateLimitRPS, Metrics: m.Handler(),
-		StartedAt: time.Now(), History: history, ShareProxy: shareHandler,
+		StartedAt: time.Now(), History: history,
 	})
 	return httpx.Run(ctx, log, httpx.NewServer(":"+cfg.Port, h), cfg.ShutdownTimeout)
 }

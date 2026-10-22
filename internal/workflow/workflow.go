@@ -40,6 +40,8 @@ func FileName(id string) string { return id + ".json" }
 type Source struct {
 	ID          string
 	Name        string
+	Owner       string
+	Publisher   string
 	Nodes       any
 	Connections any
 	NodeGroups  any // canvas frames; kept only when non-empty so old files do not churn

@@ -17,15 +17,19 @@ type Owner struct {
 }
 
 // Mapper resolves workflow ownership to a repository using server-side configuration only.
-// There is no fallback repository and no client-supplied repository.
 type Mapper struct {
-	byKey map[string]config.Mapping
-	repos map[string]bool
+	byKey       map[string]config.Mapping
+	repos       map[string]bool
+	defaultRepo string
 }
 
-// NewMapper indexes the configured mappings.
-func NewMapper(ms []config.Mapping) *Mapper {
+// NewMapper indexes the configured mappings and optional default repository.
+func NewMapper(ms []config.Mapping, defaultRepo ...string) *Mapper {
 	m := &Mapper{byKey: map[string]config.Mapping{}, repos: map[string]bool{}}
+	if len(defaultRepo) > 0 && strings.TrimSpace(defaultRepo[0]) != "" {
+		m.defaultRepo = strings.TrimSpace(defaultRepo[0])
+		m.repos[m.defaultRepo] = true
+	}
 	for _, x := range ms {
 		m.byKey[normalizeIdent(x.N8NUser)] = x
 		m.repos[x.Repository] = true
@@ -80,6 +84,14 @@ func (m *Mapper) Resolve(wf *n8n.Workflow) (Owner, bool) {
 			o.Repository = mp.Repository
 			return o, true
 		}
+	}
+	if m.defaultRepo != "" {
+		o.N8NUser = o.Project
+		if o.N8NUser == "" {
+			o.N8NUser = "default"
+		}
+		o.Repository = m.defaultRepo
+		return o, true
 	}
 	return o, false
 }

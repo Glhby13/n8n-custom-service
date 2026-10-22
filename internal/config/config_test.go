@@ -19,6 +19,19 @@ func base() map[string]string {
 	}
 }
 
+func TestLoadDefaultRepository(t *testing.T) {
+	b := base()
+	delete(b, "OWNER_MAPPINGS")
+	b["DEFAULT_REPOSITORY"] = "Glhby13/n8n-git-service"
+	c, err := Load(env(b))
+	if err != nil {
+		t.Fatalf("expected success with DEFAULT_REPOSITORY, got: %v", err)
+	}
+	if c.DefaultRepository != "Glhby13/n8n-git-service" {
+		t.Fatalf("unexpected default repo: %q", c.DefaultRepository)
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	c, err := Load(env(base()))
 	if err != nil {
