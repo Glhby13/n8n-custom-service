@@ -22,9 +22,9 @@ def KANIKO_EXTRA_ARGS       = cfg('KANIKO_EXTRA_ARGS', '')
 // Manifest bump
 def MANIFEST_REPO_URL       = env.N8NGIT_MANIFEST_REPO_URL ?: env.PORTAL_MANIFEST_REPO_URL ?: 'git@github.com:Glhby13/helm-values-lab.git'
 if (MANIFEST_REPO_URL == 'none') { MANIFEST_REPO_URL = '' }
-def MANIFEST_BRANCH         = env.N8NGIT_MANIFEST_BRANCH   ?: 'main'
-def MANIFEST_PATH           = env.N8NGIT_MANIFEST_PATH     ?: 'lab-manifest'
-def MANIFEST_ENV            = env.N8NGIT_MANIFEST_ENV      ?: 'dev'
+def MANIFEST_BRANCH         = env.N8N_MANIFEST_BRANCH   ?: env.N8NGIT_MANIFEST_BRANCH   ?: 'main'
+def MANIFEST_PATH           = env.N8N_MANIFEST_PATH     ?: env.N8NGIT_MANIFEST_PATH     ?: 'lab-manifest/n8n-custom-service'
+def MANIFEST_ENV            = env.N8N_MANIFEST_ENV      ?: env.N8NGIT_MANIFEST_ENV      ?: 'dev'
 def MANIFEST_CREDENTIALS_ID = env.N8NGIT_MANIFEST_CREDENTIALS_ID ?: env.PORTAL_MANIFEST_CREDENTIALS_ID ?: 'github-helm-values-lab'
 
 def GO_IMAGE       = cfg('GO_IMAGE', 'golang:1.27.2-alpine')
