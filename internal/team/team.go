@@ -46,19 +46,21 @@ func ParseTeams(raw string) ([]Team, error) {
 
 // Options configures the team Reconciler.
 type Options struct {
-	DBURL    string
-	Teams    []Team
-	Interval time.Duration
-	Log      *slog.Logger
+	DBURL     string
+	Teams     []Team
+	AutoShare bool
+	Interval  time.Duration
+	Log       *slog.Logger
 }
 
 // Reconciler synchronises workflow sharing between team members in n8n's database.
 type Reconciler struct {
-	pool     *pgxpool.Pool
-	teams    []Team
-	interval time.Duration
-	log      *slog.Logger
-	mu       sync.Mutex
+	pool      *pgxpool.Pool
+	teams     []Team
+	autoShare bool
+	interval  time.Duration
+	log       *slog.Logger
+	mu        sync.Mutex
 }
 
 // New creates a new Reconciler. If DBURL is empty or teams are empty, returns nil.
@@ -86,10 +88,11 @@ func New(ctx context.Context, opts Options) (*Reconciler, error) {
 	}
 
 	return &Reconciler{
-		pool:     pool,
-		teams:    opts.Teams,
-		interval: opts.Interval,
-		log:      opts.Log.With("component", "team-reconciler"),
+		pool:      pool,
+		teams:     opts.Teams,
+		autoShare: opts.AutoShare,
+		interval:  opts.Interval,
+		log:       opts.Log.With("component", "team-reconciler"),
 	}, nil
 }
 
@@ -130,6 +133,11 @@ func (r *Reconciler) Run(ctx context.Context) {
 
 // Reconcile executes a single reconciliation run across all configured teams.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
+	if !r.autoShare {
+		// When autoShare is false, workflows remain personal until explicitly shared
+		// by the user via the native "Share..." button handled by ShareProxy.
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

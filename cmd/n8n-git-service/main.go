@@ -19,6 +19,7 @@ import (
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/metrics"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/n8n"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/service"
+	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/shareproxy"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/team"
 )
 
@@ -113,10 +114,27 @@ func run() error {
 		history = hp
 	}
 
+	var shareHandler http.Handler
+	if cfg.DBURL != "" {
+		sp, err := shareproxy.New(ctx, shareproxy.Options{
+			N8NBaseURL: cfg.N8NBaseURL,
+			CookieName: cfg.N8NAuthCookieName,
+			DBURL:      cfg.DBURL,
+			Timeout:    cfg.HTTPTimeout,
+			Log:        log,
+		})
+		if err != nil {
+			log.Warn("failed to initialize share proxy", "err", err)
+		} else {
+			defer sp.Close()
+			shareHandler = sp
+		}
+	}
+
 	h := service.NewHandler(service.HandlerOptions{
 		Service: svc, Poller: poller, Log: log, APIToken: cfg.ServiceAPIToken,
 		MaxBodyBytes: cfg.MaxBodyBytes, RateLimitRPS: cfg.RateLimitRPS, Metrics: m.Handler(),
-		StartedAt: time.Now(), History: history,
+		StartedAt: time.Now(), History: history, ShareProxy: shareHandler,
 	})
 	return httpx.Run(ctx, log, httpx.NewServer(":"+cfg.Port, h), cfg.ShutdownTimeout)
 }

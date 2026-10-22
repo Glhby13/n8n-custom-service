@@ -20,8 +20,10 @@ type HandlerOptions struct {
 	RateLimitRPS float64
 	Metrics      http.Handler
 	// History serves /rest/workflow-history/* (n8n session auth, see internal/historyproxy).
-	History   http.Handler
-	StartedAt time.Time
+	History http.Handler
+	// ShareProxy intercepts PUT /rest/workflows/{workflowId}/share to enable native sharing.
+	ShareProxy http.Handler
+	StartedAt  time.Time
 }
 
 // NewHandler builds the router: probes and metrics without auth, /api/v1/* with bearer auth.
@@ -47,6 +49,10 @@ func NewHandler(o HandlerOptions) http.Handler {
 	root.Handle("/api/v1/", protected)
 	if o.History != nil {
 		root.Handle("/rest/workflow-history/", o.History)
+	}
+	if o.ShareProxy != nil {
+		root.Handle("PUT /rest/workflows/{workflowId}/share", o.ShareProxy)
+		root.Handle("PUT /rest/workflows/{workflowId}/share/", o.ShareProxy)
 	}
 	root.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "unknown endpoint")
