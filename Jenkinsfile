@@ -25,10 +25,10 @@ def KANIKO_EXTRA_ARGS       = cfg('KANIKO_EXTRA_ARGS', '')
 // Defaults target the office platform-manifest repo, so no Jenkins Global property is required
 // (URL and credential ID are not secrets; the credential itself stays in Jenkins).
 // Override with N8NGIT_MANIFEST_* if needed; set N8NGIT_MANIFEST_REPO_URL='none' to skip the stage.
-def MANIFEST_REPO_URL       = env.N8NGIT_MANIFEST_REPO_URL ?: 'https://gitlab.devops.btn.co.id/platform/app-of-apps/helm-values/platform-manifest.git'
+def MANIFEST_REPO_URL       = env.N8NGIT_MANIFEST_REPO_URL ?: env.PORTAL_MANIFEST_REPO_URL ?: 'https://gitlab.devops.btn.co.id/platform/app-of-apps/helm-values/platform-manifest.git'
 if (MANIFEST_REPO_URL == 'none') { MANIFEST_REPO_URL = '' }
 def MANIFEST_BRANCH         = env.N8NGIT_MANIFEST_BRANCH   ?: 'main'
-def MANIFEST_PATH           = env.N8NGIT_MANIFEST_PATH     ?: '.'
+def MANIFEST_PATH           = env.N8NGIT_MANIFEST_PATH     ?: env.PORTAL_MANIFEST_PATH ?: '.'
 def MANIFEST_ENV            = env.N8NGIT_MANIFEST_ENV      ?: 'dev'
 // write access to platform-manifest (username+token for https URLs, SSH key for git@ URLs)
 def MANIFEST_CREDENTIALS_ID = env.N8NGIT_MANIFEST_CREDENTIALS_ID ?: env.PORTAL_MANIFEST_CREDENTIALS_ID ?: 'gitlab-sandbox'
