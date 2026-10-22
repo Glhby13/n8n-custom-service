@@ -1,0 +1,57 @@
+# Local development: n8n-git-service against an in-memory mock of n8n + GitLab.
+# No real credentials are used; the values below only work with the mock.
+#   docker compose -f deploy/local/compose.yml up --build
+# Then follow README "Local development" (publish -> versions -> get version -> rollback).
+name: n8n-git-service-local
+
+services:
+  mock:
+    image: golang:1.27.2-alpine
+    working_dir: /src
+    command: ["go", "run", "./deploy/local/mock"]
+    environment:
+      CERT_DIR: /certs
+      GOFLAGS: -mod=mod
+    volumes:
+      - ../..:/src:ro
+      - certs:/certs
+      - gomod:/go/pkg/mod
+    ports:
+      - "5678:5678" # mock n8n (also POST /mock/edit/{id}, /mock/publish/{id})
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5678/api/v1/workflows", "--header", "X-N8N-API-KEY: local-dev-n8n-key"]
+      interval: 3s
+      retries: 60
+
+  n8n-git-service:
+    build:
+      context: ../..
+    depends_on:
+      mock:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: debug
+      N8N_BASE_URL: http://mock:5678
+      N8N_API_KEY: local-dev-n8n-key
+      GITLAB_BASE_URL: https://mock:8443
+      GITLAB_CA_FILE: /certs/ca.pem
+      GITLAB_TOKEN: local-dev-gitlab-token
+      GITLAB_BRANCH: main
+      SERVICE_API_TOKEN: local-dev-service-token
+      POLL_INTERVAL: 5s
+      SYNC_ON_STARTUP: "true"
+      REDACT_PARAMETER_KEYS: password,apiKey,token,secret
+      OWNER_MAPPINGS: >-
+        [{"n8nUser":"admin psa","repository":"platform/n8n-git-sync/n8n-pluto"},
+         {"n8nUser":"gen-ai itpd","repository":"platform/n8n-git-sync/n8n-ai"}]
+    volumes:
+      - certs:/certs:ro
+    ports:
+      - "8080:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  certs:
+  gomod:

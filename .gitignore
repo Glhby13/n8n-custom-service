@@ -1,0 +1,12 @@
+/bin/
+/dist/
+*.test
+coverage.out
+coverage.*
+.env
+.env.*
+!.env.example
+.DS_Store
+# local agent files, never committed
+CLAUDE.md
+.claude/

@@ -1,0 +1,227 @@
+openapi: 3.0.3
+info:
+  title: n8n-git-service
+  version: 0.1.0
+  description: |
+    Git versioning and rollback for PUBLISHED n8n workflows.
+    The repository is always resolved server-side from the workflow owner (OWNER_MAPPINGS);
+    no endpoint accepts a repository, path or URL. Git history is never rewritten.
+servers:
+  - url: http://n8n-git-service.platform-dev.svc:8080
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness (process only)
+      security: []
+      responses:
+        "200":
+          description: alive
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: ok } } }
+  /readyz:
+    get:
+      summary: Readiness (configuration valid). Dependency state is informational and never fails the probe.
+      security: []
+      responses:
+        "200":
+          description: ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ready" }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain: { schema: { type: string } }
+  /api/v1/workflows/{workflowId}/publish:
+    post:
+      summary: Sync the currently published version of a workflow to Git (idempotent)
+      description: |
+        Reads the workflow from n8n, requires activeVersion != null, resolves the owner to the
+        configured repository, canonicalises the published snapshot and commits
+        `<workflowId>.json` only if it differs from Git HEAD. The same logic runs in the poller.
+      parameters: [{ $ref: "#/components/parameters/WorkflowId" }]
+      responses:
+        "200":
+          description: synced (changed=true) or already up to date (changed=false)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublishResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "not_published (activeVersion is null) or conflict", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: "owner_unmapped or invalid_workflow_data", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/v1/workflows/{workflowId}/versions:
+    get:
+      summary: Git history of <workflowId>.json on the configured branch (newest first)
+      parameters: [{ $ref: "#/components/parameters/WorkflowId" }]
+      responses:
+        "200":
+          description: versions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Version" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/v1/workflows/{workflowId}/versions/{commitSha}:
+    get:
+      summary: The exact <workflowId>.json stored at a commit of its history
+      parameters:
+        - { $ref: "#/components/parameters/WorkflowId" }
+        - { $ref: "#/components/parameters/CommitSha" }
+      responses:
+        "200":
+          description: stored workflow JSON (canonical form)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoredWorkflow" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/v1/workflows/{workflowId}/rollback:
+    post:
+      summary: Restore a historical version into n8n and publish it (Git is not modified)
+      description: |
+        Validates the commit belongs to the file history, the JSON and its id, the owner mapping,
+        and expectedPublishedVersion == current activeVersion.versionId (else 409). Then
+        PUT /workflows/{id} (name, nodes, connections, settings) and
+        POST /workflows/{id}/activate {versionId}. The poller later commits the restored published
+        version as a NEW commit (A -> B -> C -> D); history is never rewritten.
+      parameters: [{ $ref: "#/components/parameters/WorkflowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackRequest" }
+      responses:
+        "200":
+          description: restored and published
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: SERVICE_API_TOKEN from Secret n8n-git-service-secret
+  parameters:
+    WorkflowId:
+      name: workflowId
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+    CommitSha:
+      name: commitSha
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9a-fA-F]{40}$" }
+  responses:
+    Error:
+      description: error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [invalid_request, unauthorized, not_found, not_published, owner_unmapped, invalid_workflow_data, conflict, upstream_error, rate_limited, body_too_large, internal]
+            message: { type: string }
+        requestId: { type: string }
+    Ready:
+      type: object
+      properties:
+        status: { type: string, example: ready }
+        startedAt: { type: string, format: date-time }
+        dependencies:
+          type: object
+          properties:
+            poller:
+              type: object
+              properties:
+                lastRun: { type: string, format: date-time }
+                lastSuccess: { type: string, format: date-time }
+                lastError: { type: string }
+                consecutiveFailures: { type: integer }
+                publishedWorkflows: { type: integer }
+    PublishResult:
+      type: object
+      properties:
+        workflowId: { type: string, example: "123" }
+        workflowName: { type: string, example: Example Workflow }
+        n8nUser: { type: string, example: admin psa }
+        repository: { type: string, example: platform/n8n-git-sync/n8n-pluto }
+        filePath: { type: string, example: 123.json }
+        changed: { type: boolean }
+        commitSha: { type: string, nullable: true, description: new commit, or current HEAD when unchanged }
+        publishedVersion: { type: string, description: n8n activeVersion.versionId that was synced }
+        operation: { type: string, enum: [publish] }
+        timestamp: { type: string, format: date-time }
+    Version:
+      type: object
+      properties:
+        commitSha: { type: string }
+        shortSha: { type: string }
+        message: { type: string, example: "chore(n8n): publish workflow Example Workflow (123)" }
+        author: { type: string }
+        timestamp: { type: string, format: date-time }
+        filePath: { type: string, example: 123.json }
+    RollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [commitSha, expectedPublishedVersion]
+      properties:
+        commitSha: { type: string, pattern: "^[0-9a-fA-F]{40}$" }
+        expectedPublishedVersion: { type: string, description: current activeVersion.versionId as seen by the caller }
+    RollbackResult:
+      type: object
+      properties:
+        workflowId: { type: string }
+        workflowName: { type: string }
+        n8nUser: { type: string }
+        repository: { type: string }
+        filePath: { type: string }
+        restoredFromCommit: { type: string }
+        previousPublishedVersion: { type: string }
+        publishedVersion: { type: string }
+        operation: { type: string, enum: [rollback] }
+        gitHistoryRewritten: { type: boolean, enum: [false] }
+        timestamp: { type: string, format: date-time }
+    StoredWorkflow:
+      type: object
+      description: Whitelisted, canonical workflow definition (credential references only).
+      properties:
+        id: { type: string }
+        name: { type: string }
+        nodes: { type: array, items: { type: object } }
+        connections: { type: object }
+        settings: { type: object }
+        meta: { type: object }
+        tags: { type: array, items: { type: string } }
