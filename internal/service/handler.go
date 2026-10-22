@@ -53,6 +53,8 @@ func NewHandler(o HandlerOptions) http.Handler {
 	if o.ShareProxy != nil {
 		root.Handle("PUT /rest/workflows/{workflowId}/share", o.ShareProxy)
 		root.Handle("PUT /rest/workflows/{workflowId}/share/", o.ShareProxy)
+		root.Handle("GET /rest/settings", o.ShareProxy)
+		root.Handle("GET /rest/settings/", o.ShareProxy)
 	}
 	root.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "unknown endpoint")

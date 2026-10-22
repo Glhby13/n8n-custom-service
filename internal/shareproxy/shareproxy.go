@@ -81,8 +81,13 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
-// ServeHTTP handles PUT /rest/workflows/{workflowId}/share.
+// ServeHTTP handles PUT /rest/workflows/{workflowId}/share and GET /rest/settings.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimRight(r.URL.Path, "/") == "/rest/settings" {
+		h.handleSettings(w, r)
+		return
+	}
+
 	if r.Method != http.MethodPut {
 		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
@@ -267,4 +272,84 @@ func (h *Handler) authenticate(r *http.Request) (*userInfo, error) {
 	}
 
 	return &userInfo{ID: res.Data.ID, Email: res.Data.Email}, nil
+}
+
+// handleSettings proxies GET /rest/settings and injects enterprise.sharing = true.
+func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	targetURL := h.n8nBaseURL + "/rest/settings"
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		h.log.Error("create settings request failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	for k, vv := range r.Header {
+		if strings.EqualFold(k, "Accept-Encoding") {
+			continue
+		}
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		h.log.Error("fetch settings from n8n failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.log.Error("read settings body failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(bodyBytes)
+		return
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(bodyBytes, &payload); err == nil {
+		if data, ok := payload["data"].(map[string]any); ok {
+			var ent map[string]any
+			if e, ok := data["enterprise"].(map[string]any); ok {
+				ent = e
+			} else {
+				ent = make(map[string]any)
+				data["enterprise"] = ent
+			}
+			ent["sharing"] = true
+		}
+		if modified, err := json.Marshal(payload); err == nil {
+			bodyBytes = modified
+		}
+	}
+
+	for k, vv := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "ETag") || strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(bodyBytes)
 }
