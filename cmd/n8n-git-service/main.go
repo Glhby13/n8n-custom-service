@@ -19,6 +19,7 @@ import (
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/metrics"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/n8n"
 	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/service"
+	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/team"
 )
 
 const serviceName = "n8n-git-service"
@@ -70,6 +71,21 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if len(cfg.Teams) > 0 && cfg.DBURL != "" {
+		teamReconciler, terr := team.New(ctx, team.Options{
+			DBURL:    cfg.DBURL,
+			Teams:    cfg.Teams,
+			Interval: cfg.TeamReconcileInterval,
+			Log:      log,
+		})
+		if terr != nil {
+			log.Warn("failed to initialize team reconciler", "err", terr)
+		} else {
+			defer teamReconciler.Close()
+			go teamReconciler.Run(ctx)
+		}
+	}
 
 	var poller *service.Poller
 	if cfg.PollEnabled {

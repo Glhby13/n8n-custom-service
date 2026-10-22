@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gitlab.devops.btn.co.id/platform/n8n-git-service/internal/team"
 )
 
 // repoPattern is a strict GitLab project path: group[/subgroup...]/project.
@@ -57,6 +59,10 @@ type Config struct {
 	HistoryProxyEnabled bool
 	HistoryProxyMode    string
 	N8NAuthCookieName   string
+
+	Teams                 []team.Team
+	DBURL                 string
+	TeamReconcileInterval time.Duration
 }
 
 // Getenv is the lookup function; tests inject their own.
@@ -176,6 +182,40 @@ func Load(getenv Getenv) (*Config, error) {
 			errs = append(errs, fmt.Errorf("OWNER_MAPPINGS: invalid JSON: %w", err))
 		}
 	}
+
+	if rawTeams := strings.TrimSpace(getenv("TEAMS")); rawTeams != "" {
+		teams, err := team.ParseTeams(rawTeams)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("TEAMS: %w", err))
+		} else {
+			c.Teams = teams
+		}
+	}
+
+	c.TeamReconcileInterval = time.Duration(integer("TEAM_RECONCILE_INTERVAL_SECONDS", 10)) * time.Second
+
+	dbURL := strings.TrimSpace(getenv("DB_URL"))
+	if dbURL == "" {
+		dbURL = strings.TrimSpace(getenv("DATABASE_URL"))
+	}
+	if dbURL == "" {
+		dbHost := strings.TrimSpace(getenv("DB_HOST"))
+		dbPass := strings.TrimSpace(getenv("DB_PASSWORD"))
+		if dbPass == "" {
+			dbPass = strings.TrimSpace(getenv("PG_PASSWORD"))
+		}
+		if dbPass == "" {
+			dbPass = strings.TrimSpace(getenv("DB_POSTGRESDB_PASSWORD"))
+		}
+		if dbHost != "" && dbPass != "" {
+			dbPort := str("DB_PORT", "5432")
+			dbUser := str("DB_USER", "lab_worker")
+			dbName := str("DB_NAME", "n8n_db")
+			dbSSL := str("DB_SSLMODE", "disable")
+			dbURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", dbUser, dbPass, dbHost, dbPort, dbName, dbSSL)
+		}
+	}
+	c.DBURL = dbURL
 
 	errs = append(errs, c.validate()...)
 	if len(errs) > 0 {
