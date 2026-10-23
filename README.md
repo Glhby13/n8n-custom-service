@@ -44,13 +44,14 @@ Prinsip yang dijaga:
 
 | Bagian | Isi | Lokasi |
 |---|---|---|
-| Service Go | poller publish, sinkron ke GitLab, API versi/rollback, proxy riwayat untuk panel Versions n8n | repo ini |
-| Image | `harbor.dev.btn.co.id/n8n-git-service/n8n-git-service:<sha8>` (FROM scratch, uid 65532, ±4 MB) | `Dockerfile` |
-| CI | Jenkins multibranch `n8n-git-service` di `sandbox.dev.btn.co.id`: lint, test, govulncheck, kaniko push ke Harbor, bump tag di manifest | `Jenkinsfile` |
-| Helm chart | Deployment, Service, ServiceAccount, ConfigMap, Ingress (opsional), HPA/PDB/NetworkPolicy/ServiceMonitor (opsional) | `app-of-apps/helm-base/n8n-git-service` |
-| Values dev | image tag, URL n8n, mapping owner ke repo, Ingress `/rest/workflow-history` | `app-of-apps/helm-values/platform-manifest/n8n-git-service` |
-| ArgoCD | `- service: n8n-git-service` di ApplicationSet dev `onprem-dev-1`, sehingga Application `platform-n8n-git-service-dev-onprem-dev-1` dibuat di ns `platform-dev` | `app-of-apps/argocd-gitops/.../platform-projects-dev-onprem-dev-1-services.yaml` |
-| Repo tujuan | satu repo per owner n8n | `platform/n8n-git-sync/n8n-pluto` (owner `admin psa`), `platform/n8n-git-sync/n8n-ai` (owner `gen-ai itpd`) |
+| Microservice 1: `git-sync-service` | Poller publish, sinkron ke GitLab/GitHub, API versi/rollback, proxy riwayat untuk panel Versions n8n (`/rest/workflow-history`) | `cmd/git-sync-service` |
+| Microservice 2: `sharing-service` | Paywall bypass & granular workflow sharing via native UI modal n8n (`/rest/workflows/:id/share` dan `/rest/settings`) | `cmd/sharing-service` |
+| Microservice 3: `auth-service` | Gerbang SSO OIDC Keycloak (`n8n-lab`, role `n8n-access`), JIT auto-provisioning, dan Account Takeover / Mapping akun lokal lama | `cmd/auth-service` |
+| Image | Multi-target scratch Go binary (`harbor.lab.local/n8n-custom-service/<service>:<sha8>`, uid 65532, < 15 MB) | `Dockerfile` |
+| CI | Jenkins multibranch `n8n-custom-service`: lint, test, kaniko build 3 microservices & push ke Harbor, bump tag manifest | `Jenkinsfile` |
+| Helm Base | Generic base chart `helm-base-lab/n8n-custom-service` (Deployment, Service, Ingress) | `helm-base-lab/n8n-custom-service` |
+| Values dev | Manifest per microservice di `lab-manifest/n8n-custom-service/` (`git-sync-service`, `sharing-service`, `auth-service`) | `helm-values-lab/lab-manifest/n8n-custom-service` |
+| ArgoCD | ApplicationSet `lab-dev-n8n-custom-services` menghasilkan 3 aplikasi: `git-sync-service`, `sharing-service`, `auth-service` | `argocd-gitops-lab` |
 
 ## 2. Arsitektur
 
@@ -523,4 +524,6 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `6ef5213` | Judul commit = `<nama workflow> (<id>)`; deskripsi Publish n8n masuk body commit + komentar commit GitLab; trailer `N8n-Version-Name`. |
 | 2026-10-20 | `517ba13` = **`v2.0.0`** | Judul commit hanya nama workflow; id dipindah ke trailer `N8n-Workflow-Id`. |
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
-| 2026-10-20 | (berikutnya) | Panel Versions: kalau beberapa commit mencatat versi n8n yang sama (mis. migrasi format setelah publish), hanya commit terbaru yang memakai id itu, sehingga hanya satu entri "(Published)". |
+| 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-23 | (sharing-service) | Granular workflow sharing via native UI modal n8n tanpa paywall lisensi (`sharing-service`, PUT `/rest/workflows/:id/share`). |
+| 2026-10-22 | (git-sync) | Git trailers metadata `N8n-Workflow-Owner` dan `N8n-Workflow-Publisher` pada commit workflow. |
