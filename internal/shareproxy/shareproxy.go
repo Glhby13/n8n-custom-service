@@ -348,6 +348,15 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"loginEnabled": true,
 				"loginUrl":     "/sso/login",
 			}
+
+			var userMgmt map[string]any
+			if u, ok := data["userManagement"].(map[string]any); ok {
+				userMgmt = u
+			} else {
+				userMgmt = make(map[string]any)
+				data["userManagement"] = userMgmt
+			}
+			userMgmt["authenticationMethod"] = "oidc"
 		}
 		if modified, err := json.Marshal(payload); err == nil {
 			bodyBytes = modified
