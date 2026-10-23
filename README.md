@@ -524,6 +524,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `6ef5213` | Judul commit = `<nama workflow> (<id>)`; deskripsi Publish n8n masuk body commit + komentar commit GitLab; trailer `N8n-Version-Name`. |
 | 2026-10-20 | `517ba13` = **`v2.0.0`** | Judul commit hanya nama workflow; id dipindah ke trailer `N8n-Workflow-Id`. |
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
+| 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
 | 2026-10-23 | (sharing-service) | Granular workflow sharing via native UI modal n8n tanpa paywall lisensi (`sharing-service`, PUT `/rest/workflows/:id/share`). |
 | 2026-10-22 | (git-sync) | Git trailers metadata `N8n-Workflow-Owner` dan `N8n-Workflow-Publisher` pada commit workflow. |
