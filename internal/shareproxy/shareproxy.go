@@ -382,7 +382,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(bodyBytes)
 }
 
-// handleAssetProxy proxies static assets from n8n and customizes the SSO button label to "Masuk dengan User AD BTN".
+// handleAssetProxy proxies static assets from n8n and customizes the SSO button label to "Sign in with AD BTN".
 func (h *Handler) handleAssetProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -426,11 +426,11 @@ func (h *Handler) handleAssetProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte("label:a(o).baseText(`sso.login.button`)"), []byte(`label:"Masuk dengan User AD BTN"`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`label:a(o).baseText("sso.login.button")`), []byte(`label:"Masuk dengan User AD BTN"`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"Continue with SSO"`), []byte(`"Masuk dengan User AD BTN"`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`'Continue with SSO'`), []byte(`'Masuk dengan User AD BTN'`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"sso.login.button":"Continue with SSO"`), []byte(`"sso.login.button":"Masuk dengan User AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte("label:a(o).baseText(`sso.login.button`)"), []byte(`label:"Sign in with AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`label:a(o).baseText("sso.login.button")`), []byte(`label:"Sign in with AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"Continue with SSO"`), []byte(`"Sign in with AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`'Continue with SSO'`), []byte(`'Sign in with AD BTN'`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"sso.login.button":"Continue with SSO"`), []byte(`"sso.login.button":"Sign in with AD BTN"`))
 	}
 
 	for k, vv := range resp.Header {
