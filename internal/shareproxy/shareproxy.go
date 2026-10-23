@@ -89,8 +89,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/assets/AuthView-") && strings.HasSuffix(r.URL.Path, ".js") {
-		h.handleAuthViewAsset(w, r)
+	if strings.HasPrefix(r.URL.Path, "/assets/") {
+		h.handleAssetProxy(w, r)
 		return
 	}
 
@@ -382,8 +382,8 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(bodyBytes)
 }
 
-// handleAuthViewAsset proxies /assets/AuthView-*.js and customizes the SSO button label to "Masuk dengan User AD BTN".
-func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
+// handleAssetProxy proxies static assets from n8n and customizes the SSO button label to "Masuk dengan User AD BTN".
+func (h *Handler) handleAssetProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
@@ -396,7 +396,7 @@ func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
 	if err != nil {
-		h.log.Error("create authview asset request failed", "err", err)
+		h.log.Error("create asset proxy request failed", "err", err)
 		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -412,7 +412,7 @@ func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		h.log.Error("fetch authview asset from n8n failed", "err", err)
+		h.log.Error("fetch asset from n8n failed", "err", err)
 		http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
 		return
 	}
@@ -420,7 +420,7 @@ func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		h.log.Error("read authview asset body failed", "err", err)
+		h.log.Error("read asset body failed", "err", err)
 		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -428,6 +428,9 @@ func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte("label:a(o).baseText(`sso.login.button`)"), []byte(`label:"Masuk dengan User AD BTN"`))
 		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`label:a(o).baseText("sso.login.button")`), []byte(`label:"Masuk dengan User AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"Continue with SSO"`), []byte(`"Masuk dengan User AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`'Continue with SSO'`), []byte(`'Masuk dengan User AD BTN'`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"sso.login.button":"Continue with SSO"`), []byte(`"sso.login.button":"Masuk dengan User AD BTN"`))
 	}
 
 	for k, vv := range resp.Header {
@@ -440,7 +443,7 @@ func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(bodyBytes)
 }

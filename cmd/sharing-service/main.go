@@ -123,6 +123,7 @@ func run() error {
 	mux.Handle("GET /rest/settings/", sp)
 	mux.Handle("PUT /rest/workflows/{workflowId}/share", sp)
 	mux.Handle("PUT /rest/workflows/{workflowId}/share/", sp)
+	mux.Handle("GET /assets/", sp)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "unknown endpoint")
