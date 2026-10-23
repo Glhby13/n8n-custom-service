@@ -335,6 +335,19 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 				data["enterprise"] = ent
 			}
 			ent["sharing"] = true
+			ent["oidc"] = true
+
+			var sso map[string]any
+			if s, ok := data["sso"].(map[string]any); ok {
+				sso = s
+			} else {
+				sso = make(map[string]any)
+				data["sso"] = sso
+			}
+			sso["oidc"] = map[string]any{
+				"loginEnabled": true,
+				"loginUrl":     "/sso/login",
+			}
 		}
 		if modified, err := json.Marshal(payload); err == nil {
 			bodyBytes = modified
