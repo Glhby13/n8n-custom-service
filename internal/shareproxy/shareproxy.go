@@ -1,6 +1,7 @@
 package shareproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,6 +86,11 @@ type userInfo struct {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimRight(r.URL.Path, "/") == "/rest/settings" {
 		h.handleSettings(w, r)
+		return
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/assets/AuthView-") && strings.HasSuffix(r.URL.Path, ".js") {
+		h.handleAuthViewAsset(w, r)
 		return
 	}
 
@@ -373,5 +379,68 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(bodyBytes)
+}
+
+// handleAuthViewAsset proxies /assets/AuthView-*.js and customizes the SSO button label to "Masuk dengan User AD BTN".
+func (h *Handler) handleAuthViewAsset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	targetURL := h.n8nBaseURL + r.URL.Path
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		h.log.Error("create authview asset request failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	for k, vv := range r.Header {
+		if strings.EqualFold(k, "Accept-Encoding") || strings.EqualFold(k, "If-None-Match") || strings.EqualFold(k, "If-Modified-Since") {
+			continue
+		}
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		h.log.Error("fetch authview asset from n8n failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.log.Error("read authview asset body failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte("label:a(o).baseText(`sso.login.button`)"), []byte(`label:"Masuk dengan User AD BTN"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`label:a(o).baseText("sso.login.button")`), []byte(`label:"Masuk dengan User AD BTN"`))
+	}
+
+	for k, vv := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "ETag") || strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Cache-Control") {
+			continue
+		}
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(bodyBytes)
 }
