@@ -20,7 +20,7 @@ def BUILD_MODE              = cfg('BUILD_MODE', 'kaniko')                       
 def KANIKO_EXTRA_ARGS       = cfg('KANIKO_EXTRA_ARGS', '')
 
 // Manifest bump
-def MANIFEST_REPO_URL       = env.N8NGIT_MANIFEST_REPO_URL ?: env.PORTAL_MANIFEST_REPO_URL ?: 'git@github.com:Glhby13/helm-values-lab.git'
+def MANIFEST_REPO_URL       = env.N8N_MANIFEST_REPO_URL ?: env.N8NGIT_MANIFEST_REPO_URL ?: 'git@github.com:Glhby13/helm-values-lab.git'
 if (MANIFEST_REPO_URL == 'none') { MANIFEST_REPO_URL = '' }
 def MANIFEST_BRANCH         = env.N8N_MANIFEST_BRANCH   ?: env.N8NGIT_MANIFEST_BRANCH   ?: 'main'
 def MANIFEST_PATH           = env.N8N_MANIFEST_PATH     ?: env.N8NGIT_MANIFEST_PATH     ?: 'lab-manifest/n8n-custom-service'
@@ -125,10 +125,20 @@ pipeline {
                     mkdir -p /kaniko/.docker
                     AUTH=\$(printf '%s:%s' "\$REG_USER" "\$REG_PASS" | base64 | tr -d '\\n')
                     printf '{"auths":{"%s":{"auth":"%s"}}}' '${REGISTRY_URL}' "\$AUTH" > /kaniko/.docker/config.json
-                    /kaniko/executor --context=\$WORKSPACE --dockerfile=\$WORKSPACE/Dockerfile ${buildArgs} \
-                      ${tags.collect { "--destination=${repo}:${it}" }.join(' ')} \
-                      ${params.PUSH_IMAGES ? '' : '--no-push'} --cache=true --snapshot-mode=redo --use-new-run \
-                      --cleanup ${KANIKO_EXTRA_ARGS}
+                    for attempt in 1 2 3; do
+                      if /kaniko/executor --context=\$WORKSPACE --dockerfile=\$WORKSPACE/Dockerfile ${buildArgs} \
+                        ${tags.collect { "--destination=${repo}:${it}" }.join(' ')} \
+                        ${params.PUSH_IMAGES ? '' : '--no-push'} --cache=true --snapshot-mode=redo --use-new-run \
+                        --skip-unused-stages --cleanup --push-retry=5 --image-fs-extract-retry=3 ${KANIKO_EXTRA_ARGS}; then
+                        break
+                      fi
+                      if [ "\$attempt" = "3" ]; then
+                        echo "Kaniko build failed after 3 attempts"
+                        exit 1
+                      fi
+                      echo "Kaniko failed (attempt \$attempt/3), retrying in 5s..."
+                      sleep 5
+                    done
                   """
                 }
               }
