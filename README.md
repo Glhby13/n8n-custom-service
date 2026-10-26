@@ -300,33 +300,155 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
      `Authorization: Bearer <ADMIN_API_TOKEN>`
    - Validasi dilakukan menggunakan *constant-time comparison* (`crypto/subtle`).
 
-4. **Katalog REST API Manajemen Akun & Workflow**:
-   - **Transfer Kepemilikan Workflow & Credentials** (`POST /admin/api/v1/transfer-ownership`):
-     ```bash
-     curl -s -k -X POST https://<host-n8n>/admin/api/v1/transfer-ownership \
-       -H "Authorization: Bearer $ADMIN_API_TOKEN" \
-       -H "Content-Type: application/json" \
-       -d '{
-         "from_email": "developer-lama@btn.co.id",
-         "to_email": "developer-baru@btn.co.id",
-         "scope": "all",
-         "disable_source": false
-       }'
+4. **Panduan Lengkap REST API auth-service (Postman & cURL)**:
+
+   Semua endpoint administratif `auth-service` berada di bawah prefix `/admin/api/v1/*` (atau `/admin/api/*` untuk kompatibilitas).
+
+   #### A. Konfigurasi Autentikasi di Postman
+   - Masuk ke tab **Authorization** pada Postman.
+   - Pilih **Type**: `Bearer Token`.
+   - Masukkan nilai **Token**: `<ADMIN_API_TOKEN>` (misal: `N8nAdminApiTokenLab2026#` di lab atau token Secret di kantor).
+   - *Catatan:* Tidak memerlukan username dan password.
+   - Pastikan di **Settings Postman (`Cmd + ,`)**:
+     - Proxy tab: matikan *Use system proxy* (OFF).
+     - General tab: matikan *SSL certificate verification* (OFF).
+
+   ---
+
+   #### B. Endpoint 1: Menampilkan Daftar Pengguna (`GET /admin/api/v1/users`)
+   Melihat seluruh pengguna yang terdaftar di n8n, hak akses aktif mereka (`global:owner`, `global:admin`, `global:member`), status akun, dan ID personal project mereka.
+
+   - **Method**: `GET`
+   - **Path**: `https://<host-n8n>/admin/api/v1/users`
+   - **Header**: `Authorization: Bearer <ADMIN_API_TOKEN>`
+   - **Contoh Response (`200 OK`)**:
+     ```json
+     {
+       "data": [
+         {
+           "id": "22735a0f-67ab-4505-aa00-4af6a894ccec",
+           "email": "admin@lab.local",
+           "first_name": "Admin",
+           "last_name": "Lab",
+           "role": "global:owner",
+           "disabled": false,
+           "personal_project_id": "x6JDdjz5gmSTfDqu",
+           "created_at": "2026-10-09T22:03:30.911+07:00"
+         },
+         {
+           "id": "caa9b823-3fa1-4314-8a8a-ebaae7737bcd",
+           "email": "user@lab.local",
+           "first_name": "User",
+           "last_name": "AD",
+           "role": "global:admin",
+           "disabled": false,
+           "personal_project_id": "6pXCEsnhww3L9n80",
+           "created_at": "2026-10-16T22:43:29.171+07:00"
+         }
+       ]
+     }
      ```
-     *(Mendukung pemindahan seluruh workflow/credentials atau satu workflow tertentu via `"scope":"workflow","workflow_id":"<id>"` antar akun AD maupun lokal)*.
-   - **Lihat Pengguna & Role Aktif** (`GET /admin/api/v1/users`):
-     ```bash
-     curl -s -k https://<host-n8n>/admin/api/v1/users \
-       -H "Authorization: Bearer $ADMIN_API_TOKEN" | jq
+
+   ---
+
+   #### C. Endpoint 2: Transfer Kepemilikan Workflow & Kredensial (`POST /admin/api/v1/transfer-ownership`)
+   Memindahkan hak milik workflow dan kredensial antar akun (misal dari akun developer lokal lama ke akun AD baru, atau pelimpahan tugas antar user AD).
+
+   - **Method**: `POST`
+   - **Path**: `https://<host-n8n>/admin/api/v1/transfer-ownership`
+   - **Header**:
+     - `Authorization: Bearer <ADMIN_API_TOKEN>`
+     - `Content-Type: application/json`
+
+   **Skenario 1: Memindahkan SELURUH Workflow & Credentials (Account Takeover)**:
+   ```json
+   {
+     "from_email": "developer-lama@btn.co.id",
+     "to_email": "developer-baru@btn.co.id",
+     "scope": "all",
+     "disable_source": false
+   }
+   ```
+   *Parameter:*
+   - `from_email` *(string, required)*: Email pemilik aset saat ini.
+   - `to_email` *(string, required)*: Email penerima aset baru (harus sudah pernah login/terdaftar di n8n).
+   - `scope` *(string, opsional)*: `"all"` untuk seluruh aset personal (default).
+   - `disable_source` *(boolean, opsional)*: `true` jika ingin menonaktifkan akun lama (cocok untuk pegawai resign/mutasi), atau `false` jika akun lama tetap aktif.
+
+   **Skenario 2: Memindahkan SATU Workflow Tertentu Saja**:
+   ```json
+   {
+     "from_email": "user.a@btn.co.id",
+     "to_email": "user.b@btn.co.id",
+     "scope": "workflow",
+     "workflow_id": "PquKXqWxalIuZnzT"
+   }
+   ```
+   *Parameter tambahan:*
+   - `workflow_id` *(string, required jika scope = "workflow")*: ID workflow 16-karakter di n8n.
+
+   **Contoh Response (`200 OK`)**:
+   ```json
+   {
+     "status": "success",
+     "message": "Successfully transferred 9 workflow(s) and 2 credential(s) from user2@lab.local to user@lab.local",
+     "data": {
+       "from_email": "user2@lab.local",
+       "to_email": "user@lab.local",
+       "workflows_transferred": 9,
+       "credentials_transferred": 2,
+       "source_disabled": false
+     }
+   }
+   ```
+
+   ---
+
+   #### D. Endpoint 3: Ubah Role Pengguna Manual (`POST /admin/api/v1/users/{email}/role`)
+   Mengubah role pengguna secara manual melalui API (opsional/emergency override).
+
+   - **Method**: `POST`
+   - **Path**: `https://<host-n8n>/admin/api/v1/users/{email}/role`
+   - **Header**:
+     - `Authorization: Bearer <ADMIN_API_TOKEN>`
+     - `Content-Type: application/json`
+   - **Body**:
+     ```json
+     {
+       "role": "global:admin"
+     }
      ```
-   - **Update Role Manual** (`POST /admin/api/v1/users/{email}/role`):
-     ```bash
-     curl -s -k -X POST https://<host-n8n>/admin/api/v1/users/<email>/role \
-       -H "Authorization: Bearer $ADMIN_API_TOKEN" \
-       -H "Content-Type: application/json" \
-       -d '{"role": "global:admin"}'
+     *(Nilai role yang diizinkan: `"global:admin"` atau `"global:member"`. Akun `global:owner` root instance diproteksi otomatis dari perubahan).*
+   - **Contoh Response (`200 OK`)**:
+     ```json
+     {
+       "status": "success",
+       "message": "Role for user lab-test3@lab.local updated to global:admin"
+     }
      ```
-   - **Legacy Mapping Compatibility** (`GET/POST /admin/api/mappings`, `DELETE /admin/api/mappings/{oidcEmail}`).
+
+   ---
+
+   #### E. Endpoint Legacy: Account Mapping (`/admin/api/mappings`)
+   Disediakan untuk kompatibilitas skrip lama:
+   - `GET /admin/api/mappings`: Melihat daftar mapping aktif.
+   - `POST /admin/api/mappings`: Membuat mapping pengalihan akun OIDC ke akun lokal.
+   - `DELETE /admin/api/mappings/{oidcEmail}`: Menghapus mapping.
+
+   ---
+
+   #### F. Format Error Response
+   Jika request gagal atau token salah:
+   ```json
+   {
+     "error": "unauthorized",
+     "message": "Invalid or missing Bearer token in Authorization header"
+   }
+   ```
+   Status code:
+   - `400 Bad Request`: Payload JSON tidak valid atau parameter wajib belum terisi.
+   - `401 Unauthorized`: Token Bearer tidak disertakan atau token salah.
+   - `500 Internal Server Error`: Akun user asal/tujuan tidak ditemukan di database.
 
 Catatan: user DB (`lab_worker` di lab, `platform_worker` di kantor) harus boleh `UPDATE` tabel `"user"`, `project`, `shared_workflow`, dan `shared_credentials` di `n8n_db`; kalau `map-user` gagal "permission denied", periksa hak itu. Mengganti `OIDC_CLIENT_SECRET` aman: password terkelola ditimpa setiap login.
 
