@@ -371,7 +371,7 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
    ```
    *Parameter:*
    - `from_email` *(string, required)*: Email pemilik aset saat ini.
-   - `to_email` *(string, required)*: Email penerima aset baru (harus sudah pernah login/terdaftar di n8n).
+   - `to_email` *(string, required)*: Email penerima aset baru (otomatis di-provisioning jika user belum pernah login, sehingga admin bisa mentransfer kapan saja).
    - `scope` *(string, opsional)*: `"all"` untuk seluruh aset personal (default).
    - `disable_source` *(boolean, opsional)*: `true` jika ingin menonaktifkan akun lama (cocok untuk pegawai resign/mutasi), atau `false` jika akun lama tetap aktif.
 
@@ -448,7 +448,7 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
    Status code:
    - `400 Bad Request`: Payload JSON tidak valid atau parameter wajib belum terisi.
    - `401 Unauthorized`: Token Bearer tidak disertakan atau token salah.
-   - `500 Internal Server Error`: Akun user asal/tujuan tidak ditemukan di database.
+   - `500 Internal Server Error`: Akun user asal (`from_email`) tidak ditemukan di database atau database error.
 
 Catatan: user DB (`lab_worker` di lab, `platform_worker` di kantor) harus boleh `UPDATE` tabel `"user"`, `project`, `shared_workflow`, dan `shared_credentials` di `n8n_db`; kalau `map-user` gagal "permission denied", periksa hak itu. Mengganti `OIDC_CLIENT_SECRET` aman: password terkelola ditimpa setiap login.
 

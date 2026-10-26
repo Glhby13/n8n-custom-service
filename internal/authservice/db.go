@@ -438,6 +438,11 @@ func (d *DB) TransferOwnership(ctx context.Context, fromEmail, toEmail string, d
 		return nil, fmt.Errorf("from_email and to_email cannot be the same")
 	}
 
+	// 0. Auto-provision target user and personal project if they have never logged in yet
+	if err := d.EnsureUserExists(ctx, toEmail, "", ""); err != nil {
+		return nil, fmt.Errorf("auto-provision target user %q: %w", toEmail, err)
+	}
+
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transfer tx: %w", err)
