@@ -61,10 +61,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sso/login", s.handleSSOLogin)
 	mux.HandleFunc("GET /sso/callback", s.handleSSOCallback)
 
-	// Admin API Endpoints
-	mux.HandleFunc("GET /admin/api/mappings", s.adminAuth(s.handleListMappings))
-	mux.HandleFunc("POST /admin/api/mappings", s.adminAuth(s.handleCreateMapping))
-	mux.HandleFunc("DELETE /admin/api/mappings/{oidcEmail}", s.adminAuth(s.handleDeleteMapping))
+	// Admin API Endpoints (Token-based Bearer authentication)
+	mux.HandleFunc("POST /admin/api/v1/transfer-ownership", s.tokenAuth(s.handleTransferOwnership))
+	mux.HandleFunc("GET /admin/api/v1/users", s.tokenAuth(s.handleListUsers))
+	mux.HandleFunc("POST /admin/api/v1/users/{email}/role", s.tokenAuth(s.handleUpdateUserRole))
+
+	// Legacy compatibility mappings
+	mux.HandleFunc("GET /admin/api/mappings", s.tokenAuth(s.handleListMappings))
+	mux.HandleFunc("POST /admin/api/mappings", s.tokenAuth(s.handleCreateMapping))
+	mux.HandleFunc("DELETE /admin/api/mappings/{oidcEmail}", s.tokenAuth(s.handleDeleteMapping))
 
 	return mux
 }
@@ -147,6 +152,17 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("ensure user exists failed", "email", targetEmail, "err", err)
 		s.renderError(w, http.StatusInternalServerError, "Gagal memverifikasi akun di database n8n.")
 		return
+	}
+
+	// 4b. Sync role with Keycloak (claims.HasRole("n8n-admin") -> global:admin, else global:member)
+	targetRole := "global:member"
+	if claims.HasRole("n8n-admin") {
+		targetRole = "global:admin"
+	}
+	if err := s.db.SyncUserRole(ctx, targetEmail, targetRole); err != nil {
+		s.log.Warn("sync user role failed", "email", targetEmail, "role", targetRole, "err", err)
+	} else {
+		s.log.Info("user role synced successfully", "email", targetEmail, "role", targetRole)
 	}
 
 	// 5. Generate deterministic managed password for n8n login
@@ -288,18 +304,153 @@ func (s *Server) renderError(w http.ResponseWriter, code int, msg string) {
 	_, _ = fmt.Fprintf(w, tmpl, msg)
 }
 
-// adminAuth checks HTTP Basic Authentication against configured AdminUsername and AdminPassword.
-func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
+// tokenAuth enforces Bearer token authentication (or fallback to X-Admin-Token / Basic Auth).
+func (s *Server) tokenAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUsername)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPassword)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="n8n-auth-service"`)
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
+		// 1. Check Bearer Token in Authorization header
+		authHdr := r.Header.Get("Authorization")
+		if strings.HasPrefix(strings.ToLower(authHdr), "bearer ") {
+			token := strings.TrimSpace(authHdr[7:])
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminAPIToken)) == 1 {
+				next(w, r)
+				return
+			}
 		}
-		next(w, r)
+
+		// 2. Check X-Admin-Token header
+		if customToken := strings.TrimSpace(r.Header.Get("X-Admin-Token")); customToken != "" {
+			if subtle.ConstantTimeCompare([]byte(customToken), []byte(s.cfg.AdminAPIToken)) == 1 {
+				next(w, r)
+				return
+			}
+		}
+
+		// 3. Fallback: HTTP Basic Auth for legacy scripts
+		if user, pass, ok := r.BasicAuth(); ok {
+			if subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUsername)) == 1 &&
+				subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPassword)) == 1 {
+				next(w, r)
+				return
+			}
+		}
+
+		w.Header().Set("WWW-Authenticate", `Bearer realm="n8n-auth-service"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   "unauthorized",
+			"message": "Invalid or missing Bearer token in Authorization header",
+		})
 	}
+}
+
+type transferOwnershipPayload struct {
+	FromEmail     string `json:"from_email"`
+	ToEmail       string `json:"to_email"`
+	Scope         string `json:"scope"`          // "all" (default) or "workflow"
+	WorkflowID    string `json:"workflow_id"`    // optional if scope == "workflow"
+	DisableSource bool   `json:"disable_source"` // optional
+}
+
+func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request) {
+	var p transferOwnershipPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid json payload: "+err.Error())
+		return
+	}
+
+	p.FromEmail = strings.TrimSpace(p.FromEmail)
+	p.ToEmail = strings.TrimSpace(p.ToEmail)
+	if p.FromEmail == "" || p.ToEmail == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "validation_error", "both from_email and to_email are required")
+		return
+	}
+
+	if strings.EqualFold(p.Scope, "workflow") && p.WorkflowID == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "validation_error", "workflow_id is required when scope is 'workflow'")
+		return
+	}
+
+	res, err := s.db.TransferOwnership(r.Context(), p.FromEmail, p.ToEmail, p.DisableSource, p.WorkflowID)
+	if err != nil {
+		s.log.Error("transfer ownership failed", "err", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "transfer_failed", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	msg := fmt.Sprintf("Successfully transferred %d workflow(s) and %d credential(s) from %s to %s",
+		res.WorkflowsTransferred, res.CredentialsTransferred, res.FromEmail, res.ToEmail)
+	if res.WorkflowID != "" {
+		msg = fmt.Sprintf("Successfully transferred workflow %s from %s to %s", res.WorkflowID, res.FromEmail, res.ToEmail)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":  "success",
+		"message": msg,
+		"data":    res,
+	})
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.db.ListUsers(r.Context())
+	if err != nil {
+		s.log.Error("list users failed", "err", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "db_error", "list users: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": users})
+}
+
+type updateUserRolePayload struct {
+	Role string `json:"role"`
+}
+
+func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
+	email := r.PathValue("email")
+	if email == "" {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 2 {
+			email = parts[len(parts)-2] // /admin/api/v1/users/{email}/role
+		}
+	}
+	if email == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "missing_param", "missing user email")
+		return
+	}
+
+	dec, err := url.PathUnescape(email)
+	if err == nil {
+		email = dec
+	}
+
+	var p updateUserRolePayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid json payload: "+err.Error())
+		return
+	}
+
+	p.Role = strings.TrimSpace(p.Role)
+	if p.Role != "global:admin" && p.Role != "global:member" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "validation_error", "role must be 'global:admin' or 'global:member'")
+		return
+	}
+
+	if err := s.db.SyncUserRole(r.Context(), email, p.Role); err != nil {
+		s.log.Error("update user role failed", "email", email, "role", p.Role, "err", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "update_role_failed", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":  "success",
+		"message": fmt.Sprintf("Role for user %s updated to %s", email, p.Role),
+	})
 }
 
 func (s *Server) handleListMappings(w http.ResponseWriter, r *http.Request) {

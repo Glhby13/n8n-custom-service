@@ -273,43 +273,60 @@ curl -s -X POST -H "Authorization: Bearer $T" \
 
 Bedanya dengan Restore di n8n: API **langsung mem-publish** versi yang dipulihkan. Kalau `expectedPublishedVersion` sudah tidak cocok (ada publish lain di sela-sela), API menolak dengan **409**.
 
-### 6.5 Mapping akun SSO ke akun n8n lama (auth-service)
+### 6.5 Autentikasi SSO, Keycloak Role Admin & Transfer Kepemilikan (auth-service)
 
-Login SSO (Keycloak) memetakan email Keycloak ke satu akun n8n lewat tabel `n8n_auth_mappings` di `n8n_db` (dibuat otomatis oleh service saat start, tanpa DDL manual).
+Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identitas enterprise dan manajemen role otomatis:
 
-**Alur login** (`/sso/callback`): tukar `code` ke token, wajib punya role Keycloak `n8n-access` (kalau tidak: 403), cari email di `n8n_auth_mappings`. Kalau ada, akun tujuan = `target_n8n_email`; kalau tidak, akun tujuan = email Keycloak itu sendiri. Kalau akun tujuan belum ada di tabel `"user"` n8n, dibuat otomatis (role `global:member` + personal project). Service lalu memasang password terkelola (SHA-256 dari `OIDC_CLIENT_SECRET` + email, disimpan bcrypt), login ke n8n lewat `/rest/login`, dan menyerahkan cookie `n8n-auth` ke browser. User tidak pernah mengetahui password n8n-nya.
+1. **Sinkronisasi Role Admin Otomatis dari Keycloak (Zero Terminal)**:
+   - Keycloak Client `n8n-lab` menyediakan client role: `n8n-access`, `n8n-admin`, dan `n8n-user`.
+   - Group Keycloak:
+     - Parent `n8n` $\rightarrow$ client role `n8n-access` (izin masuk).
+     - Child `n8n-admin` $\rightarrow$ client role `n8n-admin`.
+     - Child `n8n-user` $\rightarrow$ client role `n8n-user`.
+   - Saat login SSO (`/sso/callback`), service membaca klaim role dari token OIDC:
+     - User dengan role **`n8n-admin`** otomatis diset sebagai **`global:admin`** di n8n (bisa kelola Settings, Users, Community Nodes, dsb.).
+     - User dengan role **`n8n-user`** diset sebagai **`global:member`**.
+     - Akun root awal **`global:owner`** diproteksi agar tidak terdowngrade.
+   - Admin cukup memasukkan atau mengeluarkan user dari group `n8n-admin` di Keycloak.
 
-**Kapan mapping perlu**: tanpa mapping, user SSO baru mendapat akun n8n **kosong**. Untuk memindahkan workflow dan credential dari akun lokal lama, jalankan `map-user` satu kali per user.
+2. **Security Hardening: Nonaktifkan Mutasi di Exec Pod**:
+   - Untuk mencegah modifikasi sepihak tanpa audit trail, perintah mutasi CLI di dalam container (`map-user`, `unmap`) **dinonaktifkan** (`SECURITY ERROR`).
+   - CLI container hanya melayani perintah read-only: `/app list-users` dan `/app list-mappings`.
+   - Seluruh mutasi data akun dan transfer aset **wajib** melalui REST API terotentikasi Bearer Token.
 
-**Cara 1: CLI di dalam pod (disarankan).** Image berbasis `scratch` tanpa shell, jadi terminal ArgoCD/Rancher kosong dan tidak bisa dipakai. Panggil binary `/app` langsung lewat `kubectl exec` (env DB sudah ada di pod):
+3. **Token-Based Identity (Bearer Token) untuk Postman / API Client**:
+   - Token rahasia admin didefinisikan pada Secret `n8n-auth-service-secret` dengan key `ADMIN_API_TOKEN`.
+   - Setiap panggilan API wajib menyertakan header:
+     `Authorization: Bearer <ADMIN_API_TOKEN>`
+   - Validasi dilakukan menggunakan *constant-time comparison* (`crypto/subtle`).
 
-```bash
-# namespace: kantor platform-dev, lab lab-dev
-NS=platform-dev
-kubectl -n $NS exec deploy/auth-service -- /app list-mappings
-kubectl -n $NS exec deploy/auth-service -- /app map-user \
-  --oidc <email-keycloak> --replace <email-akun-n8n-lama> --first <Nama> --last <Belakang>
-kubectl -n $NS exec deploy/auth-service -- /app unmap --oidc <email-keycloak>
-```
-
-`map-user` berjalan dalam satu transaksi:
-
-| Kondisi | Hasil |
-|---|---|
-| Email OIDC **belum** ada di n8n | Akun lama di-rename ke identitas OIDC (email, nama, nama personal project). Workflow dan credential ikut karena `id` tetap. |
-| Email OIDC **sudah** ada di n8n | `shared_workflow` dan `shared_credentials` dipindah ke personal project akun OIDC, akun lama di-`disabled`. |
-
-Keduanya lalu menulis baris `ACTIVE` ke `n8n_auth_mappings`. `unmap` hanya menghapus baris mapping, **tidak** mengembalikan perubahan di atas.
-
-**Cara 2: Admin API** (Basic Auth `ADMIN_USERNAME`/`ADMIN_PASSWORD` dari Secret `n8n-auth-service-secret`, diekspos di host n8n path `/admin/api`):
-
-```bash
-curl -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" https://<host-n8n>/admin/api/mappings
-curl -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" -X POST https://<host-n8n>/admin/api/mappings \
-  -H 'Content-Type: application/json' \
-  -d '{"oidc_email":"<email-keycloak>","replace_local_email":"<email-akun-n8n-lama>","first_name":"Nama","last_name":"Belakang"}'
-curl -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" -X DELETE https://<host-n8n>/admin/api/mappings/<email-keycloak-url-encoded>
-```
+4. **Katalog REST API Manajemen Akun & Workflow**:
+   - **Transfer Kepemilikan Workflow & Credentials** (`POST /admin/api/v1/transfer-ownership`):
+     ```bash
+     curl -s -k -X POST https://<host-n8n>/admin/api/v1/transfer-ownership \
+       -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+       -H "Content-Type: application/json" \
+       -d '{
+         "from_email": "developer-lama@btn.co.id",
+         "to_email": "developer-baru@btn.co.id",
+         "scope": "all",
+         "disable_source": false
+       }'
+     ```
+     *(Mendukung pemindahan seluruh workflow/credentials atau satu workflow tertentu via `"scope":"workflow","workflow_id":"<id>"` antar akun AD maupun lokal)*.
+   - **Lihat Pengguna & Role Aktif** (`GET /admin/api/v1/users`):
+     ```bash
+     curl -s -k https://<host-n8n>/admin/api/v1/users \
+       -H "Authorization: Bearer $ADMIN_API_TOKEN" | jq
+     ```
+   - **Update Role Manual** (`POST /admin/api/v1/users/{email}/role`):
+     ```bash
+     curl -s -k -X POST https://<host-n8n>/admin/api/v1/users/<email>/role \
+       -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+       -H "Content-Type: application/json" \
+       -d '{"role": "global:admin"}'
+     ```
+   - **Legacy Mapping Compatibility** (`GET/POST /admin/api/mappings`, `DELETE /admin/api/mappings/{oidcEmail}`).
 
 Catatan: user DB (`lab_worker` di lab, `platform_worker` di kantor) harus boleh `UPDATE` tabel `"user"`, `project`, `shared_workflow`, dan `shared_credentials` di `n8n_db`; kalau `map-user` gagal "permission denied", periksa hak itu. Mengganti `OIDC_CLIENT_SECRET` aman: password terkelola ditimpa setiap login.
 
@@ -566,6 +583,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-26 | (auth-service) | Security hardening: Token-Based Identity (Bearer token via `ADMIN_API_TOKEN`), penonaktifan mutasi akun di exec pod CLI (Single Door of Entry), sinkronisasi otomatis role Admin Keycloak (group `n8n-admin` $\rightarrow$ `global:admin`, `n8n-user` $\rightarrow$ `global:member`), serta REST API `/admin/api/v1/transfer-ownership` & `/admin/api/v1/users`. |
 | 2026-10-23 | (docs) | Panduan mapping akun SSO ke akun n8n lama (CLI `kubectl exec ... /app map-user`, Admin API, perilaku dua skenario) ditambahkan di §6.5. |
 | 2026-10-23 | (sharing-service) | Granular workflow sharing via native UI modal n8n tanpa paywall lisensi (`sharing-service`, PUT `/rest/workflows/:id/share`). |
 | 2026-10-22 | (git-sync) | Git trailers metadata `N8n-Workflow-Owner` dan `N8n-Workflow-Publisher` pada commit workflow. |

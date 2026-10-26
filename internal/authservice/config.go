@@ -19,6 +19,7 @@ type Config struct {
 	N8NPublicURL     string
 	AdminUsername    string
 	AdminPassword    string
+	AdminAPIToken    string
 }
 
 // LoadConfig loads configuration from environment variables.
@@ -107,6 +108,12 @@ func LoadConfig() (*Config, error) {
 		adminPass = "N8nAuthServiceLab2026#"
 	}
 
+	adminAPIToken := strings.TrimSpace(os.Getenv("ADMIN_API_TOKEN"))
+	if adminAPIToken == "" {
+		// #nosec G101 - default fallback for local dev/lab environment
+		adminAPIToken = "N8nAdminApiTokenLab2026#"
+	}
+
 	return &Config{
 		Port:             port,
 		LogLevel:         logLevel,
@@ -119,5 +126,6 @@ func LoadConfig() (*Config, error) {
 		N8NPublicURL:     n8nPublicURL,
 		AdminUsername:    adminUser,
 		AdminPassword:    adminPass,
+		AdminAPIToken:    adminAPIToken,
 	}, nil
 }

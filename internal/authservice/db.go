@@ -344,3 +344,215 @@ func (d *DB) EnsureManagedPassword(ctx context.Context, email, plainPassword str
 	`, string(hashedPass), email)
 	return err
 }
+
+// UserInfo represents summary information of an n8n user.
+type UserInfo struct {
+	ID                string    `json:"id"`
+	Email             string    `json:"email"`
+	FirstName         string    `json:"first_name"`
+	LastName          string    `json:"last_name"`
+	Role              string    `json:"role"`
+	Disabled          bool      `json:"disabled"`
+	PersonalProjectID string    `json:"personal_project_id"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// TransferResult holds the outcome of a workflow/credential transfer.
+type TransferResult struct {
+	FromEmail              string `json:"from_email"`
+	ToEmail                string `json:"to_email"`
+	WorkflowsTransferred   int64  `json:"workflows_transferred"`
+	CredentialsTransferred int64  `json:"credentials_transferred"`
+	SourceDisabled         bool   `json:"source_disabled"`
+	WorkflowID             string `json:"workflow_id,omitempty"`
+}
+
+// SyncUserRole synchronizes an n8n user's roleSlug with Keycloak (global:admin or global:member).
+// It preserves global:owner role (initial instance root/owner).
+func (d *DB) SyncUserRole(ctx context.Context, email, targetRole string) error {
+	email = strings.TrimSpace(strings.ToLower(email))
+	targetRole = strings.TrimSpace(targetRole)
+	if targetRole != "global:admin" && targetRole != "global:member" {
+		return fmt.Errorf("invalid target role: %s (must be global:admin or global:member)", targetRole)
+	}
+
+	var currentRole string
+	err := d.pool.QueryRow(ctx, `SELECT "roleSlug" FROM "user" WHERE LOWER(email) = LOWER($1);`, email).Scan(&currentRole)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", email, err)
+	}
+
+	if currentRole == "global:owner" {
+		d.log.Info("preserving global:owner role for user", "email", email)
+		return nil
+	}
+
+	if currentRole == targetRole {
+		return nil
+	}
+
+	d.log.Info("updating user role in n8n_db", "email", email, "old_role", currentRole, "new_role", targetRole)
+	_, err = d.pool.Exec(ctx, `
+		UPDATE "user"
+		SET "roleSlug" = $1, "updatedAt" = NOW()
+		WHERE LOWER(email) = LOWER($2);
+	`, targetRole, email)
+	return err
+}
+
+// ListUsers returns all users in n8n_db along with their personal project ID.
+func (d *DB) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	const query = `
+		SELECT u.id, COALESCE(u.email, ''), COALESCE(u."firstName", ''), COALESCE(u."lastName", ''),
+		       u."roleSlug", u.disabled, COALESCE(pr."projectId", ''), u."createdAt"
+		FROM "user" u
+		LEFT JOIN project_relation pr ON pr."userId" = u.id AND pr.role = 'project:personalOwner'
+		ORDER BY u."createdAt" ASC;
+	`
+	rows, err := d.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query users: %w", err)
+	}
+	defer rows.Close()
+
+	var list []UserInfo
+	for rows.Next() {
+		var u UserInfo
+		if err := rows.Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.Role, &u.Disabled, &u.PersonalProjectID, &u.CreatedAt); err == nil {
+			list = append(list, u)
+		}
+	}
+	return list, nil
+}
+
+// TransferOwnership transfers workflows and credentials between any two n8n accounts.
+func (d *DB) TransferOwnership(ctx context.Context, fromEmail, toEmail string, disableSource bool, workflowID string) (*TransferResult, error) {
+	fromEmail = strings.TrimSpace(strings.ToLower(fromEmail))
+	toEmail = strings.TrimSpace(strings.ToLower(toEmail))
+	workflowID = strings.TrimSpace(workflowID)
+
+	if fromEmail == "" || toEmail == "" {
+		return nil, fmt.Errorf("both from_email and to_email are required")
+	}
+	if fromEmail == toEmail {
+		return nil, fmt.Errorf("from_email and to_email cannot be the same")
+	}
+
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transfer tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Get source user and project ID
+	var fromUserID, fromProjID string
+	err = tx.QueryRow(ctx, `
+		SELECT u.id, pr."projectId"
+		FROM "user" u
+		JOIN project_relation pr ON pr."userId" = u.id AND pr.role = 'project:personalOwner'
+		WHERE LOWER(u.email) = LOWER($1);
+	`, fromEmail).Scan(&fromUserID, &fromProjID)
+	if err != nil {
+		return nil, fmt.Errorf("source user %q not found or has no personal project: %w", fromEmail, err)
+	}
+
+	// 2. Get target user and project ID
+	var toUserID, toProjID string
+	err = tx.QueryRow(ctx, `
+		SELECT u.id, pr."projectId"
+		FROM "user" u
+		JOIN project_relation pr ON pr."userId" = u.id AND pr.role = 'project:personalOwner'
+		WHERE LOWER(u.email) = LOWER($1);
+	`, toEmail).Scan(&toUserID, &toProjID)
+	if err != nil {
+		return nil, fmt.Errorf("target user %q not found or has no personal project: %w", toEmail, err)
+	}
+
+	res := &TransferResult{
+		FromEmail:      fromEmail,
+		ToEmail:        toEmail,
+		SourceDisabled: disableSource,
+		WorkflowID:     workflowID,
+	}
+
+	// 3. Transfer workflows
+	if workflowID != "" {
+		// Single workflow transfer
+		// Remove target project relation on this workflow if already shared (to prevent primary key conflict)
+		_, _ = tx.Exec(ctx, `
+			DELETE FROM shared_workflow
+			WHERE "projectId" = $1 AND "workflowId" = $2;
+		`, toProjID, workflowID)
+
+		tag, err := tx.Exec(ctx, `
+			UPDATE shared_workflow
+			SET "projectId" = $1, role = 'workflow:owner', "updatedAt" = NOW()
+			WHERE "projectId" = $2 AND "workflowId" = $3;
+		`, toProjID, fromProjID, workflowID)
+		if err != nil {
+			return nil, fmt.Errorf("transfer workflow %s: %w", workflowID, err)
+		}
+		res.WorkflowsTransferred = tag.RowsAffected()
+	} else {
+		// All workflows transfer
+		// Delete any existing share entries for target project on workflows owned by source project
+		_, err = tx.Exec(ctx, `
+			DELETE FROM shared_workflow
+			WHERE "projectId" = $1
+			  AND "workflowId" IN (SELECT "workflowId" FROM shared_workflow WHERE "projectId" = $2);
+		`, toProjID, fromProjID)
+		if err != nil {
+			return nil, fmt.Errorf("clean existing target workflow shares: %w", err)
+		}
+
+		tagWf, err := tx.Exec(ctx, `
+			UPDATE shared_workflow
+			SET "projectId" = $1, role = 'workflow:owner', "updatedAt" = NOW()
+			WHERE "projectId" = $2;
+		`, toProjID, fromProjID)
+		if err != nil {
+			return nil, fmt.Errorf("transfer all workflows: %w", err)
+		}
+		res.WorkflowsTransferred = tagWf.RowsAffected()
+
+		// Transfer all credentials
+		_, err = tx.Exec(ctx, `
+			DELETE FROM shared_credentials
+			WHERE "projectId" = $1
+			  AND "credentialsId" IN (SELECT "credentialsId" FROM shared_credentials WHERE "projectId" = $2);
+		`, toProjID, fromProjID)
+		if err != nil {
+			return nil, fmt.Errorf("clean existing target credential shares: %w", err)
+		}
+
+		tagCred, err := tx.Exec(ctx, `
+			UPDATE shared_credentials
+			SET "projectId" = $1, role = 'credential:owner', "updatedAt" = NOW()
+			WHERE "projectId" = $2;
+		`, toProjID, fromProjID)
+		if err != nil {
+			return nil, fmt.Errorf("transfer all credentials: %w", err)
+		}
+		res.CredentialsTransferred = tagCred.RowsAffected()
+	}
+
+	// 4. Optionally disable source user
+	if disableSource {
+		_, err = tx.Exec(ctx, `
+			UPDATE "user"
+			SET disabled = true, "updatedAt" = NOW()
+			WHERE id = $1;
+		`, fromUserID)
+		if err != nil {
+			return nil, fmt.Errorf("disable source user: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transfer tx: %w", err)
+	}
+
+	d.log.Info("transfer ownership completed", "from", fromEmail, "to", toEmail,
+		"workflows", res.WorkflowsTransferred, "credentials", res.CredentialsTransferred, "disabled", disableSource)
+	return res, nil
+}

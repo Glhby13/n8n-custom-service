@@ -2,7 +2,6 @@ package authservice
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -16,27 +15,13 @@ func RunCLI(ctx context.Context, args []string, cfg *Config, db *DB) bool {
 
 	cmd := args[1]
 	switch cmd {
-	case "map-user":
-		fs := flag.NewFlagSet("map-user", flag.ExitOnError)
-		oidc := fs.String("oidc", "", "OIDC user email (e.g. lab-test3@lab.local)")
-		replace := fs.String("replace", "", "Legacy local n8n email to replace (e.g. developer-loan@lab.local)")
-		first := fs.String("first", "User", "First name for OIDC account")
-		last := fs.String("last", "Lab", "Last name for OIDC account")
-		_ = fs.Parse(args[2:])
-
-		if *oidc == "" || *replace == "" {
-			fmt.Println("Error: both --oidc and --replace flags are required.")
-			fmt.Println("Usage: n8n-auth-service map-user --oidc <oidc-email> --replace <local-email>")
-			os.Exit(1)
-		}
-
-		fmt.Printf("Mapping OIDC user %q to take over local account %q...\n", *oidc, *replace)
-		if err := db.ExecuteTakeover(ctx, *oidc, *replace, *first, *last); err != nil {
-			fmt.Printf("FAILED: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("SUCCESS: Account %q has taken over all workflows, credentials, and settings of %q!\n", *oidc, *replace)
+	case "map-user", "unmap", "transfer-ownership", "set-role":
+		fmt.Fprintf(os.Stderr, "SECURITY ERROR: CLI-based data mutation via exec pod is DISABLED for security hardening.\n")
+		fmt.Fprintf(os.Stderr, "All account modifications and workflow transfers must be performed through the authenticated REST API:\n")
+		fmt.Fprintf(os.Stderr, "  POST /admin/api/v1/transfer-ownership\n")
+		fmt.Fprintf(os.Stderr, "  POST /admin/api/v1/users/{email}/role\n")
+		fmt.Fprintf(os.Stderr, "Header required: Authorization: Bearer <ADMIN_API_TOKEN>\n")
+		os.Exit(1)
 		return true
 
 	case "list-mappings":
@@ -59,21 +44,19 @@ func RunCLI(ctx context.Context, args []string, cfg *Config, db *DB) bool {
 		_ = w.Flush()
 		return true
 
-	case "unmap":
-		fs := flag.NewFlagSet("unmap", flag.ExitOnError)
-		oidc := fs.String("oidc", "", "OIDC user email to remove from mapping")
-		_ = fs.Parse(args[2:])
-
-		if *oidc == "" {
-			fmt.Println("Error: --oidc flag is required.")
-			os.Exit(1)
-		}
-
-		if err := db.DeleteMapping(ctx, *oidc); err != nil {
+	case "list-users":
+		users, err := db.ListUsers(ctx)
+		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("SUCCESS: Mapping for %q removed.\n", *oidc)
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		_, _ = fmt.Fprintln(w, "ID\tEMAIL\tROLE\tDISABLED\tPROJECT ID\tCREATED AT")
+		for _, u := range users {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\t%s\n",
+				u.ID, u.Email, u.Role, u.Disabled, u.PersonalProjectID, u.CreatedAt.Format("2006-01-02 15:04:05"))
+		}
+		_ = w.Flush()
 		return true
 
 	case "help", "--help", "-h":
@@ -87,14 +70,15 @@ func RunCLI(ctx context.Context, args []string, cfg *Config, db *DB) bool {
 }
 
 func printHelp() {
-	fmt.Println("n8n-auth-service CLI Management Tool")
+	fmt.Println("n8n-auth-service CLI Management Tool (Read-Only Mode)")
 	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  map-user       Map an OIDC account to take over an existing local n8n account")
-	fmt.Println("                 Flags: --oidc <email> --replace <localEmail> [--first <name>] [--last <name>]")
+	fmt.Println("Security Policy:")
+	fmt.Println("  All mutating commands (map-user, transfer-ownership, set-role) via exec pod are DISABLED.")
+	fmt.Println("  Use the authenticated REST API with Bearer Token (/admin/api/v1/...) for all mutations.")
+	fmt.Println()
+	fmt.Println("Read-Only Commands:")
+	fmt.Println("  list-users     Display all n8n users and their current roles")
 	fmt.Println("  list-mappings  Display all active account mappings")
-	fmt.Println("  unmap          Remove an account mapping")
-	fmt.Println("                 Flags: --oidc <email>")
 	fmt.Println("  healthcheck    Run HTTP health check probe")
 	fmt.Println()
 }
