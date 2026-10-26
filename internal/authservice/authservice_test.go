@@ -72,8 +72,6 @@ func TestParseJWTClaimsWithAdminRole(t *testing.T) {
 func TestTokenAuth(t *testing.T) {
 	cfg := &Config{
 		AdminAPIToken: "SecretToken1234567890#",
-		AdminUsername: "admin",
-		AdminPassword: "password",
 	}
 	srv := &Server{cfg: cfg}
 

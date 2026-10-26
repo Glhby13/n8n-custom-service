@@ -17,8 +17,6 @@ type Config struct {
 	OIDCRedirectURL  string
 	N8NBaseURL       string
 	N8NPublicURL     string
-	AdminUsername    string
-	AdminPassword    string
 	AdminAPIToken    string
 }
 
@@ -97,17 +95,6 @@ func LoadConfig() (*Config, error) {
 		n8nPublicURL = "https://n8n.lab.local"
 	}
 
-	adminUser := strings.TrimSpace(os.Getenv("ADMIN_USERNAME"))
-	if adminUser == "" {
-		adminUser = "admin"
-	}
-
-	adminPass := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
-	if adminPass == "" {
-		// #nosec G101 - default fallback for local dev/lab environment
-		adminPass = "N8nAuthServiceLab2026#"
-	}
-
 	adminAPIToken := strings.TrimSpace(os.Getenv("ADMIN_API_TOKEN"))
 	if adminAPIToken == "" {
 		// #nosec G101 - default fallback for local dev/lab environment
@@ -124,8 +111,6 @@ func LoadConfig() (*Config, error) {
 		OIDCRedirectURL:  redirectURL,
 		N8NBaseURL:       n8nBaseURL,
 		N8NPublicURL:     n8nPublicURL,
-		AdminUsername:    adminUser,
-		AdminPassword:    adminPass,
 		AdminAPIToken:    adminAPIToken,
 	}, nil
 }

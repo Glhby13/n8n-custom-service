@@ -325,15 +325,6 @@ func (s *Server) tokenAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		// 3. Fallback: HTTP Basic Auth for legacy scripts
-		if user, pass, ok := r.BasicAuth(); ok {
-			if subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUsername)) == 1 &&
-				subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPassword)) == 1 {
-				next(w, r)
-				return
-			}
-		}
-
 		w.Header().Set("WWW-Authenticate", `Bearer realm="n8n-auth-service"`)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
