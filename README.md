@@ -304,19 +304,23 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
 
    Semua endpoint administratif `auth-service` berada di bawah prefix `/admin/api/v1/*` (atau `/admin/api/*` untuk kompatibilitas).
 
-   #### A. Konfigurasi Autentikasi di Postman
-   - Masuk ke tab **Authorization** pada Postman.
-   - Pilih **Type**: `Bearer Token`.
-   - Masukkan nilai **Token**: `<ADMIN_API_TOKEN>` (misal: `N8nAdminApiTokenLab2026#` di lab atau token Secret di kantor).
-   - *Catatan:* Tidak memerlukan username dan password.
-   - Pastikan di **Settings Postman (`Cmd + ,`)**:
-     - Proxy tab: matikan *Use system proxy* (OFF).
-     - General tab: matikan *SSL certificate verification* (OFF).
+   #### A. Konfigurasi Autentikasi & URL di Postman
+   - **Base URL**:
+     - **Lab**: `https://n8n.lab.local`
+     - **Kantor**: `https://n8n.dev.btn.co.id`
+   - **Authorization Tab**:
+     - Masuk ke tab **Authorization** pada Postman.
+     - Pilih **Type**: `Bearer Token`.
+     - Masukkan nilai **Token**: `<ADMIN_API_TOKEN>` (diambil dari Secret `n8n-auth-service-secret`, misal `N8nAdminApiTokenLab2026#` di lab atau token kantor).
+     - *Catatan:* Tidak memerlukan username dan password.
+   - **Postman Settings Wajib (`Cmd + ,`)**:
+     - Tab **Proxy**: Matikan *Use system proxy* (OFF) agar request ke domain internal/lab tidak dibelokkan ke luar.
+     - Tab **General**: Matikan *SSL certificate verification* (OFF) jika sertifikat SSL lokal bertipe internal CA.
 
    ---
 
    #### B. Endpoint 1: Menampilkan Daftar Pengguna (`GET /admin/api/v1/users`)
-   Melihat seluruh pengguna yang terdaftar di n8n, hak akses aktif mereka (`global:owner`, `global:admin`, `global:member`), status akun, dan ID personal project mereka.
+   Melihat seluruh pengguna yang terdaftar di n8n, hak akses aktif mereka (`global:owner`, `global:admin`, `global:member`), status aktif/disabled, dan ID personal project mereka.
 
    - **Method**: `GET`
    - **Path**: `https://<host-n8n>/admin/api/v1/users`
@@ -373,7 +377,7 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
    - `from_email` *(string, required)*: Email pemilik aset saat ini.
    - `to_email` *(string, required)*: Email penerima aset baru (otomatis di-provisioning jika user belum pernah login, sehingga admin bisa mentransfer kapan saja).
    - `scope` *(string, opsional)*: `"all"` untuk seluruh aset personal (default).
-   - `disable_source` *(boolean, opsional)*: `true` jika ingin menonaktifkan akun lama (cocok untuk pegawai resign/mutasi), atau `false` jika akun lama tetap aktif.
+   - `disable_source` *(boolean, opsional)*: `true` jika ingin langsung menonaktifkan akun lama (cocok untuk pegawai resign/mutasi), atau `false` jika akun lama tetap aktif.
 
    **Skenario 2: Memindahkan SATU Workflow Tertentu Saja**:
    ```json
@@ -404,7 +408,88 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
 
    ---
 
-   #### D. Endpoint 3: Ubah Role Pengguna Manual (`POST /admin/api/v1/users/{email}/role`)
+   #### D. Endpoint 3: Ubah Status Pengguna / Enable & Disable (`POST /admin/api/v1/users/{email}/status`)
+   Mengaktifkan kembali atau menonaktifkan akun pengguna di n8n.
+   *(Sangat berguna pada n8n Community edition karena UI web n8n tidak menyediakan tombol Re-enable untuk akun yang ter-disable).*
+
+   - **Method**: `POST`
+   - **Path**: `https://<host-n8n>/admin/api/v1/users/{email}/status`
+   - **Header**:
+     - `Authorization: Bearer <ADMIN_API_TOKEN>`
+     - `Content-Type: application/json`
+
+   **Body Menonaktifkan Akun (Disable)**:
+   ```json
+   {
+     "disabled": true
+   }
+   ```
+
+   **Body Mengaktifkan Akun Kembali (Enable)**:
+   ```json
+   {
+     "disabled": false
+   }
+   ```
+
+   **Contoh Response (`200 OK`)**:
+   ```json
+   {
+     "status": "success",
+     "message": "User status for elroy21945@btn.co.id updated successfully",
+     "data": {
+       "email": "elroy21945@btn.co.id",
+       "disabled": false
+     }
+   }
+   ```
+   *(Proteksi bawaan: Akun root `global:owner` diproteksi dan tidak dapat di-disable).*
+
+   ---
+
+   #### E. Endpoint 4: Hapus Pengguna / Delete User (`DELETE /admin/api/v1/users/{email}`)
+   Menghapus akun pengguna dari database n8n secara permanen.
+
+   - **Method**: `DELETE`
+   - **Path**: `https://<host-n8n>/admin/api/v1/users/{email}`
+   - **Query Parameters**:
+     - `force` *(boolean, opsional, default: `false`)*: Jika `false`, penghapusan akan dicegah apabila pengguna masih memiliki workflow aktif di personal project-nya. Jika `force=true`, seluruh workflow dan relasi pengguna akan ikut dibersihkan (cascade).
+   - **Header**:
+     - `Authorization: Bearer <ADMIN_API_TOKEN>`
+
+   **Contoh Request Aman (Gagal jika masih ada workflow)**:
+   `DELETE https://<host-n8n>/admin/api/v1/users/user.lama@btn.co.id`
+
+   *Response jika masih ada workflow (`400 Bad Request`)*:
+   ```json
+   {
+     "error": {
+       "code": "cannot_delete_user_with_workflows",
+       "message": "Cannot delete user user.lama@btn.co.id: user still owns 3 workflow(s). Transfer ownership first or pass ?force=true to delete permanently"
+     }
+   }
+   ```
+
+   **Contoh Request Force Delete**:
+   `DELETE https://<host-n8n>/admin/api/v1/users/user.lama@btn.co.id?force=true`
+
+   *Response Sukses (`200 OK`)*:
+   ```json
+   {
+     "status": "success",
+     "message": "User user.lama@btn.co.id deleted successfully",
+     "data": {
+       "email": "user.lama@btn.co.id",
+       "workflows_deleted": 3,
+       "credentials_deleted": 1
+     }
+   }
+   ```
+   *(Proteksi bawaan: Akun root `global:owner` diproteksi dan tidak dapat dihapus).*
+
+   ---
+
+   #### F. Endpoint 5: Ubah Role Pengguna Manual (`POST /admin/api/v1/users/{email}/role`)
    Mengubah role pengguna secara manual melalui API (opsional/emergency override).
 
    - **Method**: `POST`
@@ -429,7 +514,7 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
 
    ---
 
-   #### E. Endpoint Legacy: Account Mapping (`/admin/api/mappings`)
+   #### G. Endpoint Legacy: Account Mapping (`/admin/api/mappings`)
    Disediakan untuk kompatibilitas skrip lama:
    - `GET /admin/api/mappings`: Melihat daftar mapping aktif.
    - `POST /admin/api/mappings`: Membuat mapping pengalihan akun OIDC ke akun lokal.
@@ -437,7 +522,25 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
 
    ---
 
-   #### F. Format Error Response
+   #### H. Penjelasan Mendalam: Apa yang Terjadi Jika User SSO di-Disable atau di-Delete via API?
+
+   Banyak admin menanyakan apa yang terjadi jika pengguna login via SSO Keycloak, namun di n8n akunnya di-**disable** atau di-**delete** melalui API:
+
+   | Tindakan Admin via API | Status di SSO Keycloak | Apa yang Terjadi Saat User Klik "Sign in with SSO"? |
+   |---|---|---|
+   | **DISABLE USER** (`POST .../status` `{"disabled":true}`) | Masih aktif & punya role `n8n-access` | **DITOLAK SEKETIKA (HTTP 403 Forbidden)**. Meskipun login Keycloak berhasil, saat Keycloak redirect ke callback `auth-service`, sistem mendeteksi status `disabled = true` di database n8n. Sistem langsung memutus alur login, menolak membuat sesi n8n, dan menampilkan pesan: *"Akses ditolak: Akun telah dinonaktifkan oleh Administrator"*. Status `disabled` tetap terkunci aman dan akun tidak bisa dipakai login. |
+   | **ENABLE USER** (`POST .../status` `{"disabled":false}`) | Masih aktif & punya role `n8n-access` | **BERHASIL LOGIN**. Akun kembali aktif normal dan sesi login terbentuk seperti biasa. |
+   | **DELETE USER** (`DELETE .../users/{email}`) | Masih aktif & punya role `n8n-access` | **DIBUATKAN AKUN BARU KOSONG (JIT Provisioning)**. Karena data user di database n8n sudah terhapus permanen, saat user login SSO Keycloak, `auth-service` memperlakukannya sebagai pengguna baru pertama kali. Sistem otomatis membuat akun baru dengan personal project kosong (tanpa workflow lama). |
+
+   > [!IMPORTANT]
+   > **Rekomendasi Keamanan untuk Admin:**
+   > - Jika ingin **mencabut akses pengguna (pegawai mutasi/resign)** tanpa user bisa login ulang dan tanpa membuat akun baru yang liar: **Gunakan fitur DISABLE (`POST /admin/api/v1/users/{email}/status`)** atau **cabut role `n8n-access` pada akun user di Keycloak**.
+   > - Hindari sekadar men-DELETE user jika hak akses SSO di Keycloak belum dicabut, karena mekanisme JIT n8n akan mengizinkan pembuatan akun baru saat user login SSO kembali.
+   > - Jika user pindah akun atau ganti format email: Selalu jalankan **TRANSFER OWNERSHIP (`POST /transfer-ownership`)** terlebih dahulu sebelum menonaktifkan atau menghapus akun lama!
+
+   ---
+
+   #### I. Format Error Response
    Jika request gagal atau token salah:
    ```json
    {
@@ -446,9 +549,11 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
    }
    ```
    Status code:
-   - `400 Bad Request`: Payload JSON tidak valid atau parameter wajib belum terisi.
+   - `400 Bad Request`: Payload JSON tidak valid, user masih memiliki workflow saat delete tanpa `?force=true`, atau parameter wajib belum terisi.
    - `401 Unauthorized`: Token Bearer tidak disertakan atau token salah.
-   - `500 Internal Server Error`: Akun user asal (`from_email`) tidak ditemukan di database atau database error.
+   - `403 Forbidden`: Tindakan dilarang (misal mencoba mengubah status, role, atau menghapus akun `global:owner`).
+   - `404 Not Found`: Email pengguna yang dituju tidak ditemukan di database n8n.
+   - `500 Internal Server Error`: Kesalahan internal server atau kegagalan query database.
 
 Catatan: user DB (`lab_worker` di lab, `platform_worker` di kantor) harus boleh `UPDATE` tabel `"user"`, `project`, `shared_workflow`, dan `shared_credentials` di `n8n_db`; kalau `map-user` gagal "permission denied", periksa hak itu. Mengganti `OIDC_CLIENT_SECRET` aman: password terkelola ditimpa setiap login.
 
@@ -705,6 +810,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-26 | (auth-service) | Penambahan Endpoint REST API Manajemen: Enable/Disable status pengguna (`POST /admin/api/v1/users/{email}/status`), Delete pengguna (`DELETE /admin/api/v1/users/{email}`) dengan proteksi aset dan opsi `?force=true`, pencegahan overwrite status disabled pada login SSO, serta penolakan login SSO (HTTP 403 Forbidden) bila akun berstatus disabled. |
 | 2026-10-26 | (auth-service) | Security hardening: Token-Based Identity (Bearer token via `ADMIN_API_TOKEN`), penonaktifan mutasi akun di exec pod CLI (Single Door of Entry), sinkronisasi otomatis role Admin Keycloak (group `n8n-admin` $\rightarrow$ `global:admin`, `n8n-user` $\rightarrow$ `global:member`), serta REST API `/admin/api/v1/transfer-ownership` & `/admin/api/v1/users`. |
 | 2026-10-23 | (docs) | Panduan mapping akun SSO ke akun n8n lama (CLI `kubectl exec ... /app map-user`, Admin API, perilaku dua skenario) ditambahkan di §6.5. |
 | 2026-10-23 | (sharing-service) | Granular workflow sharing via native UI modal n8n tanpa paywall lisensi (`sharing-service`, PUT `/rest/workflows/:id/share`). |

@@ -65,6 +65,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/v1/transfer-ownership", s.tokenAuth(s.handleTransferOwnership))
 	mux.HandleFunc("GET /admin/api/v1/users", s.tokenAuth(s.handleListUsers))
 	mux.HandleFunc("POST /admin/api/v1/users/{email}/role", s.tokenAuth(s.handleUpdateUserRole))
+	mux.HandleFunc("POST /admin/api/v1/users/{email}/status", s.tokenAuth(s.handleUpdateUserStatus))
+	mux.HandleFunc("DELETE /admin/api/v1/users/{email}", s.tokenAuth(s.handleDeleteUser))
 
 	// Legacy compatibility mappings
 	mux.HandleFunc("GET /admin/api/mappings", s.tokenAuth(s.handleListMappings))
@@ -140,6 +142,13 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	if err == nil && mapping != nil && mapping.TargetN8nEmail != "" {
 		targetEmail = mapping.TargetN8nEmail
 		s.log.Info("oidc user mapped to existing n8n account", "oidc", claims.Email, "target", targetEmail)
+	}
+
+	// 3b. Check if user account is disabled in n8n_db
+	if isDisabled, err := s.db.IsUserDisabled(ctx, targetEmail); err == nil && isDisabled {
+		s.log.Warn("disabled user attempted sso login", "email", targetEmail)
+		s.renderError(w, http.StatusForbidden, "Akses ditolak: Akun "+targetEmail+" telah dinonaktifkan oleh Administrator.")
+		return
 	}
 
 	// 4. Ensure target user exists in n8n_db (JIT provisioning)
@@ -441,6 +450,88 @@ func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":  "success",
 		"message": fmt.Sprintf("Role for user %s updated to %s", email, p.Role),
+	})
+}
+
+type updateUserStatusPayload struct {
+	Disabled bool `json:"disabled"`
+}
+
+func (s *Server) handleUpdateUserStatus(w http.ResponseWriter, r *http.Request) {
+	email := r.PathValue("email")
+	if email == "" {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 2 {
+			email = parts[len(parts)-2] // /admin/api/v1/users/{email}/status
+		}
+	}
+	if email == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "missing_param", "missing user email")
+		return
+	}
+
+	dec, err := url.PathUnescape(email)
+	if err == nil {
+		email = dec
+	}
+
+	var p updateUserStatusPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		httpx.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid json payload: "+err.Error())
+		return
+	}
+
+	if err := s.db.SetUserDisabled(r.Context(), email, p.Disabled); err != nil {
+		s.log.Error("set user disabled status failed", "email", email, "disabled", p.Disabled, "err", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "update_status_failed", err.Error())
+		return
+	}
+
+	action := "enabled"
+	if p.Disabled {
+		action = "disabled"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":   "success",
+		"message":  fmt.Sprintf("User %s has been successfully %s", email, action),
+		"disabled": p.Disabled,
+	})
+}
+
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	email := r.PathValue("email")
+	if email == "" {
+		parts := strings.Split(r.URL.Path, "/")
+		email = parts[len(parts)-1]
+	}
+	if email == "" {
+		httpx.WriteError(w, r, http.StatusBadRequest, "missing_param", "missing user email")
+		return
+	}
+
+	dec, err := url.PathUnescape(email)
+	if err == nil {
+		email = dec
+	}
+
+	force := strings.EqualFold(r.URL.Query().Get("force"), "true")
+
+	res, err := s.db.DeleteUser(r.Context(), email, force)
+	if err != nil {
+		s.log.Error("delete user failed", "email", email, "force", force, "err", err)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "delete_user_failed", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":  "success",
+		"message": fmt.Sprintf("User %s and personal project successfully deleted", email),
+		"data":    res,
 	})
 }
 

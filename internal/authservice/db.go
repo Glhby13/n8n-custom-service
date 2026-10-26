@@ -339,7 +339,7 @@ func (d *DB) EnsureManagedPassword(ctx context.Context, email, plainPassword str
 
 	_, err = d.pool.Exec(ctx, `
 		UPDATE "user"
-		SET password = $1, disabled = false, "updatedAt" = NOW()
+		SET password = $1, "updatedAt" = NOW()
 		WHERE LOWER(email) = LOWER($2);
 	`, string(hashedPass), email)
 	return err
@@ -365,6 +365,115 @@ type TransferResult struct {
 	CredentialsTransferred int64  `json:"credentials_transferred"`
 	SourceDisabled         bool   `json:"source_disabled"`
 	WorkflowID             string `json:"workflow_id,omitempty"`
+}
+
+// DeleteUserResult holds outcome of user deletion.
+type DeleteUserResult struct {
+	Email             string `json:"email"`
+	PersonalProjectID string `json:"personal_project_id"`
+	WorkflowsDeleted  int64  `json:"workflows_deleted"`
+}
+
+// IsUserDisabled checks whether an n8n user is disabled.
+func (d *DB) IsUserDisabled(ctx context.Context, email string) (bool, error) {
+	var disabled bool
+	err := d.pool.QueryRow(ctx, `SELECT disabled FROM "user" WHERE LOWER(email) = LOWER($1);`, strings.TrimSpace(email)).Scan(&disabled)
+	if err != nil {
+		return false, err
+	}
+	return disabled, nil
+}
+
+// SetUserDisabled sets the disabled status of an n8n user.
+func (d *DB) SetUserDisabled(ctx context.Context, email string, disabled bool) error {
+	email = strings.TrimSpace(strings.ToLower(email))
+	var roleSlug string
+	err := d.pool.QueryRow(ctx, `SELECT "roleSlug" FROM "user" WHERE LOWER(email) = LOWER($1);`, email).Scan(&roleSlug)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", email, err)
+	}
+
+	if roleSlug == "global:owner" && disabled {
+		return fmt.Errorf("cannot disable instance owner (global:owner)")
+	}
+
+	d.log.Info("setting user disabled status", "email", email, "disabled", disabled)
+	_, err = d.pool.Exec(ctx, `
+		UPDATE "user"
+		SET disabled = $1, "updatedAt" = NOW()
+		WHERE LOWER(email) = LOWER($2);
+	`, disabled, email)
+	return err
+}
+
+// DeleteUser deletes an n8n user and their personal project safely.
+func (d *DB) DeleteUser(ctx context.Context, email string, force bool) (*DeleteUserResult, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+
+	var userID, roleSlug, projID string
+	err := d.pool.QueryRow(ctx, `
+		SELECT u.id, u."roleSlug", COALESCE(pr."projectId", '')
+		FROM "user" u
+		LEFT JOIN project_relation pr ON pr."userId" = u.id AND pr.role = 'project:personalOwner'
+		WHERE LOWER(u.email) = LOWER($1);
+	`, email).Scan(&userID, &roleSlug, &projID)
+	if err != nil {
+		return nil, fmt.Errorf("user %q not found: %w", email, err)
+	}
+
+	if roleSlug == "global:owner" {
+		return nil, fmt.Errorf("cannot delete instance owner (global:owner)")
+	}
+
+	// Check workflow count if not forced
+	var wfCount int64
+	if projID != "" {
+		_ = d.pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM shared_workflow
+			WHERE "projectId" = $1 AND role = 'workflow:owner';
+		`, projID).Scan(&wfCount)
+
+		if wfCount > 0 && !force {
+			return nil, fmt.Errorf("user still owns %d workflow(s); transfer ownership first or set force=true to delete permanently", wfCount)
+		}
+	}
+
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin delete user tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 1. Remove mapping entry
+	_, _ = tx.Exec(ctx, `
+		DELETE FROM n8n_auth_mappings
+		WHERE LOWER(oidc_email) = LOWER($1) OR LOWER(target_n8n_email) = LOWER($1);
+	`, email)
+
+	// 2. Remove personal project and cascade relations
+	if projID != "" {
+		_, _ = tx.Exec(ctx, `DELETE FROM shared_workflow WHERE "projectId" = $1;`, projID)
+		_, _ = tx.Exec(ctx, `DELETE FROM shared_credentials WHERE "projectId" = $1;`, projID)
+		_, _ = tx.Exec(ctx, `DELETE FROM project_relation WHERE "projectId" = $1 OR "userId" = $2;`, projID, userID)
+		_, _ = tx.Exec(ctx, `DELETE FROM project WHERE id = $1 AND type = 'personal';`, projID)
+	}
+
+	// 3. Delete user record
+	_, err = tx.Exec(ctx, `DELETE FROM "user" WHERE id = $1;`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("delete user record: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit delete user tx: %w", err)
+	}
+
+	d.log.Info("user deleted successfully", "email", email, "workflows_deleted", wfCount)
+	return &DeleteUserResult{
+		Email:             email,
+		PersonalProjectID: projID,
+		WorkflowsDeleted:  wfCount,
+	}, nil
 }
 
 // SyncUserRole synchronizes an n8n user's roleSlug with Keycloak (global:admin or global:member).
