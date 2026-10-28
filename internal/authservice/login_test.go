@@ -494,3 +494,24 @@ func TestTOTPKnownVector(t *testing.T) {
 		t.Fatal("validTOTP misjudged codes")
 	}
 }
+
+func TestOTPLabelMatchesKeycloaksOwn(t *testing.T) {
+	// Keycloak's enrolment page labels the entry "<realm display name>:<user name>", e.g. "Lab:lab-test3".
+	uri := otpauthURI("JBSWY3DPEHPK3PXP", "lab-test3", "Lab")
+	for _, want := range []string{"otpauth://totp/Lab:lab-test3?", "secret=JBSWY3DPEHPK3PXP", "issuer=Lab", "digits=6", "period=30", "algorithm=SHA1"} {
+		if !strings.Contains(uri, want) {
+			t.Fatalf("uri %q lacks %q", uri, want)
+		}
+	}
+	// the account is the user name even when the e-mail is known, and falls back only when there is none
+	c := &UserClaims{PreferredUsername: "lab-test3", Email: "lab-test3@lab.local"}
+	if got := otpAccount(c, "LAB-TEST3@lab.local"); got != "lab-test3" {
+		t.Fatalf("account = %q, want the Keycloak user name", got)
+	}
+	if got := otpAccount(&UserClaims{Email: "a@lab.local"}, "typed"); got != "typed" {
+		t.Fatalf("fallback account = %q", got)
+	}
+	if realmName("https://auth.lab.local/realms/lab") != "lab" || realmName("https://x") != "Keycloak" {
+		t.Fatal("realmName fallback wrong")
+	}
+}

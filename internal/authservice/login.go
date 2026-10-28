@@ -24,7 +24,6 @@ import (
 var webFS embed.FS
 
 const (
-	loginIssuer      = "n8n"
 	adminRole        = "n8n-admin"
 	maxUserFailures  = 5
 	maxIPFailures    = 20
@@ -232,6 +231,17 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 	s.finish(w, res, in.Redirect)
 }
 
+// otpAccount is the account name shown in the authenticator app: the Keycloak user name, as on Keycloak's own
+// enrolment page (never the e-mail address, and never the application name, because the code belongs to the user).
+func otpAccount(c *UserClaims, typed string) string {
+	for _, v := range []string{c.PreferredUsername, typed, c.Email} {
+		if v != "" {
+			return v
+		}
+	}
+	return "user"
+}
+
 // beginEnrolment makes a secret and the QR code for it and holds the secret in memory (not in Keycloak, not in any
 // database) until the user proves the authenticator works.
 func (s *Server) beginEnrolment(w http.ResponseWriter, claims *UserClaims, in credentials) {
@@ -240,11 +250,7 @@ func (s *Server) beginEnrolment(w http.ResponseWriter, claims *UserClaims, in cr
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	account := claims.Email
-	if account == "" {
-		account = in.Username
-	}
-	qr, err := qrDataURI(b32, account, loginIssuer)
+	qr, err := qrDataURI(b32, otpAccount(claims, in.Username), s.cfg.OTPIssuer)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return

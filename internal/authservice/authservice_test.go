@@ -137,3 +137,21 @@ func TestConfigLoad(t *testing.T) {
 		t.Errorf("expected client id n8n-lab, got %s", cfg.OIDCClientID)
 	}
 }
+
+func TestOTPIssuerConfig(t *testing.T) {
+	_ = os.Setenv("DB_HOST", "127.0.0.1")
+	_ = os.Setenv("DB_PASSWORD", "secret")
+	defer func() {
+		_ = os.Unsetenv("DB_HOST")
+		_ = os.Unsetenv("DB_PASSWORD")
+		_ = os.Unsetenv("OTP_ISSUER")
+	}()
+	cfg, err := LoadConfig()
+	if err != nil || cfg.OTPIssuer != "lab" {
+		t.Fatalf("default issuer must be the realm name: %q %v", cfg.OTPIssuer, err)
+	}
+	_ = os.Setenv("OTP_ISSUER", "Lab")
+	if cfg, _ = LoadConfig(); cfg.OTPIssuer != "Lab" {
+		t.Fatalf("OTP_ISSUER must win: %q", cfg.OTPIssuer)
+	}
+}

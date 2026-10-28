@@ -18,6 +18,9 @@ type Config struct {
 	N8NBaseURL       string
 	N8NPublicURL     string
 	AdminAPIToken    string
+	// OTPIssuer is the issuer shown in the authenticator app for the one-time code ("Lab:lab-test3"). Keep it equal to
+	// the realm's display name so a code enrolled here looks exactly like one enrolled on Keycloak's own page.
+	OTPIssuer string
 }
 
 // LoadConfig loads configuration from environment variables.
@@ -101,6 +104,11 @@ func LoadConfig() (*Config, error) {
 		adminAPIToken = "N8nAdminApiTokenLab2026#"
 	}
 
+	otpIssuer := strings.TrimSpace(os.Getenv("OTP_ISSUER"))
+	if otpIssuer == "" {
+		otpIssuer = realmName(kcURL)
+	}
+
 	return &Config{
 		Port:             port,
 		LogLevel:         logLevel,
@@ -112,5 +120,14 @@ func LoadConfig() (*Config, error) {
 		N8NBaseURL:       n8nBaseURL,
 		N8NPublicURL:     n8nPublicURL,
 		AdminAPIToken:    adminAPIToken,
+		OTPIssuer:        otpIssuer,
 	}, nil
+}
+
+// realmName is the realm segment of a Keycloak realm URL, the fallback issuer when OTP_ISSUER is not set.
+func realmName(realmURL string) string {
+	if i := strings.LastIndex(realmURL, "/realms/"); i >= 0 && i+len("/realms/") < len(realmURL) {
+		return realmURL[i+len("/realms/"):]
+	}
+	return "Keycloak"
 }

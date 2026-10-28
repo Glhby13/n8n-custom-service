@@ -575,6 +575,12 @@ Setelah 6 digit pertama benar, secret ditulis ke **Keycloak sebagai kredensial O
 saat itu setiap login admin diverifikasi Keycloak. OTP yang sudah ada tidak pernah ditimpa (`RegisterOTP` menolak).
 Tidak ada tabel atau DB baru; DB n8n tidak disentuh.
 
+**Label di aplikasi authenticator = label Keycloak sendiri.** TOTP itu milik user, bukan milik aplikasi, jadi QR memakai
+format yang sama dengan halaman Keycloak: `<nama tampilan realm>:<username>`, misalnya `Lab:lab-test3` (bukan `n8n:email`).
+Penerbit diatur lewat env `OTP_ISSUER` (isi dengan **nama tampilan realm**; bila kosong, dipakai nama realm dari
+`KEYCLOAK_URL`), akun = `preferred_username` Keycloak. Label kredensial di Keycloak Admin = "Authenticator" (netral).
+Label hanya ada di aplikasi authenticator, bukan di Keycloak: entri yang sudah terdaftar sebelumnya tetap sah dengan label lamanya.
+
 **Cara halaman ini muncul.** SPA n8n pindah ke `/signin` di sisi klien, jadi ingress saja tidak cukup:
 1. `sharing-service` (asset-proxy `/assets/*`) menyisipkan satu baris di awal komponen `SigninView` (chunk
    `SigninView-<hash>.js`, dicari lewat nama komponen `SigninView` pada `__name:`) yang melakukan
@@ -849,6 +855,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-28 | (login, label) | Label QR OTP mengikuti Keycloak (`Lab:<username>`, env `OTP_ISSUER`), label kredensial netral "Authenticator". |
 | 2026-10-28 | (login) | **Halaman login n8n baru** di `auth-service` (`/signin`): Sign in with AD BTN (Keycloak Direct Grant, modal TOTP/QR di halaman, OTP didaftarkan sebagai kredensial OTP asli Keycloak) dan Sign in with local account (`/rest/login` n8n), tanpa Forgot password; tambalan `SigninView` di `sharing-service`; ingress `/signin`. Lihat §6.6. |
 | 2026-10-26 | (auth-service) | Penambahan Endpoint REST API Manajemen: Enable/Disable status pengguna (`POST /admin/api/v1/users/{email}/status`), Delete pengguna (`DELETE /admin/api/v1/users/{email}`) dengan proteksi aset dan opsi `?force=true`, pencegahan overwrite status disabled pada login SSO, serta penolakan login SSO (HTTP 403 Forbidden) bila akun berstatus disabled. |
 | 2026-10-26 | (auth-service) | Security hardening: Token-Based Identity (Bearer token via `ADMIN_API_TOKEN`), penonaktifan mutasi akun di exec pod CLI (Single Door of Entry), sinkronisasi otomatis role Admin Keycloak (group `n8n-admin` $\rightarrow$ `global:admin`, `n8n-user` $\rightarrow$ `global:member`), serta REST API `/admin/api/v1/transfer-ownership` & `/admin/api/v1/users`. |

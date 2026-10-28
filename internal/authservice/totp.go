@@ -67,11 +67,16 @@ func validTOTP(raw, code string, now time.Time) bool {
 	return ok == 1
 }
 
+// otpauthURI is the enrolment URI an authenticator app reads. Its label is "<issuer>:<account>", the same form
+// Keycloak's own enrolment page produces, so the entry looks identical whichever application showed the QR code.
+func otpauthURI(b32, account, issuer string) string {
+	return fmt.Sprintf("otpauth://totp/%s?secret=%s&issuer=%s&algorithm=SHA1&digits=%d&period=%d",
+		url.PathEscape(issuer+":"+account), url.QueryEscape(b32), url.QueryEscape(issuer), totpDigits, totpPeriod)
+}
+
 // qrDataURI renders the otpauth enrolment URI as a PNG data URI.
 func qrDataURI(b32, account, issuer string) (string, error) {
-	uri := fmt.Sprintf("otpauth://totp/%s?secret=%s&issuer=%s&algorithm=SHA1&digits=%d&period=%d",
-		url.PathEscape(issuer+":"+account), url.QueryEscape(b32), url.QueryEscape(issuer), totpDigits, totpPeriod)
-	png, err := qrcode.Encode(uri, qrcode.Medium, 256)
+	png, err := qrcode.Encode(otpauthURI(b32, account, issuer), qrcode.Medium, 256)
 	if err != nil {
 		return "", err
 	}
