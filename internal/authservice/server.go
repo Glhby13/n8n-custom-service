@@ -125,7 +125,8 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 
 	if code == "" {
-		s.renderError(w, http.StatusBadRequest, "Missing authorization code from Keycloak")
+		s.log.Warn("sso callback without authorization code")
+		s.renderError(w, http.StatusBadRequest, msgSignInFailed)
 		return
 	}
 
@@ -139,7 +140,7 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.oidc.ExchangeCode(ctx, code)
 	if err != nil {
 		s.log.Error("exchange code failed", "err", err)
-		s.renderError(w, http.StatusBadGateway, "Gagal menukar token dengan Keycloak: "+err.Error())
+		s.renderError(w, http.StatusBadGateway, msgSignInFailed)
 		return
 	}
 
@@ -182,7 +183,7 @@ func n8nSessionCookie(c *http.Cookie) *http.Cookie {
 // callback and the direct sign-in page.
 func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*loginResult, *loginFailure) {
 	if claims.Email == "" {
-		return nil, &loginFailure{http.StatusBadRequest, "Akun Keycloak Anda tidak memiliki alamat email."}
+		return nil, &loginFailure{http.StatusBadRequest, "Your account has no e-mail address, so it cannot be used to sign in. Please contact your administrator."}
 	}
 
 	// 2. Enforce Role: n8n-access
@@ -204,7 +205,7 @@ func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*log
 	// 3b. Check if user account is disabled in n8n_db
 	if isDisabled, err := s.users.IsUserDisabled(ctx, targetEmail); err == nil && isDisabled {
 		s.log.Warn("disabled user attempted sso login", "email", targetEmail)
-		return nil, &loginFailure{http.StatusForbidden, "Akses ditolak: Akun " + targetEmail + " telah dinonaktifkan oleh Administrator."}
+		return nil, &loginFailure{http.StatusForbidden, "Your account has been disabled. Please contact your administrator for assistance."}
 	}
 
 	// 4. Ensure target user exists in n8n_db (JIT provisioning)
@@ -215,7 +216,7 @@ func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*log
 	lName := claims.FamilyName
 	if err := s.users.EnsureUserExists(ctx, targetEmail, fName, lName); err != nil {
 		s.log.Error("ensure user exists failed", "email", targetEmail, "err", err)
-		return nil, &loginFailure{http.StatusInternalServerError, "Gagal memverifikasi akun di database n8n."}
+		return nil, &loginFailure{http.StatusInternalServerError, msgSignInFailed}
 	}
 
 	// 4b. Sync role with Keycloak (claims.HasRole("n8n-admin") -> global:admin, else global:member)
@@ -238,7 +239,7 @@ func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*log
 
 	if err := s.users.EnsureManagedPassword(ctx, targetEmail, managedPass); err != nil {
 		s.log.Error("ensure managed password failed", "email", targetEmail, "err", err)
-		return nil, &loginFailure{http.StatusInternalServerError, "Gagal memperbarui kredensial n8n internal."}
+		return nil, &loginFailure{http.StatusInternalServerError, msgSignInFailed}
 	}
 
 	// 6. Login to internal n8n via /rest/login to obtain official session cookie
@@ -249,7 +250,7 @@ func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*log
 	n8nCookie, err := s.loginN8n(ctx, targetEmail, managedPass, browserID)
 	if err != nil {
 		s.log.Error("internal n8n login failed", "email", targetEmail, "err", err)
-		return nil, &loginFailure{http.StatusBadGateway, "Gagal login ke server n8n internal: " + err.Error()}
+		return nil, &loginFailure{http.StatusBadGateway, msgSignInFailed}
 	}
 	return &loginResult{cookie: n8nCookie, browserID: browserID, email: targetEmail}, nil
 }
@@ -292,14 +293,14 @@ func (s *Server) renderHandoff(w http.ResponseWriter, email, browserID string) {
 	w.WriteHeader(http.StatusOK)
 
 	const tmpl = `<!doctype html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#171717">
   <meta name="robots" content="noindex">
-  <title>Membuka n8n…</title>
+  <title>Opening n8n…</title>
   <link rel="icon" href="/favicon.ico">
   <style>
     :root { color-scheme: dark; }
@@ -319,8 +320,8 @@ func (s *Server) renderHandoff(w http.ResponseWriter, email, browserID string) {
 <body>
   <main class="card" role="status" aria-live="polite">
     <img class="brand" src="/sso/assets/logo.svg" alt="n8n" width="170" height="48">
-    <h1>Membuka n8n…</h1>
-    <p>Autentikasi user AD berhasil untuk <b>{{EMAIL}}</b></p>
+    <h1>Opening n8n…</h1>
+    <p>AD user authentication successful for <b>{{EMAIL}}</b></p>
     <div class="spinner" aria-hidden="true"></div>
   </main>
   <script>
@@ -336,33 +337,56 @@ func (s *Server) renderHandoff(w http.ResponseWriter, email, browserID string) {
 	_, _ = w.Write([]byte(out))
 }
 
+// renderError shows the page that ends a failed code-flow sign-in. The message is meant for the user (neutral, no
+// internal detail: the reason is already in the log); 403 reads as "Access denied", anything else as "Sign-in failed".
 func (s *Server) renderError(w http.ResponseWriter, code int, msg string) {
+	title := "Sign-in failed"
+	if code == http.StatusForbidden {
+		title = "Access denied"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 
-	tmpl := `<!doctype html>
-<html lang="id">
+	const tmpl = `<!doctype html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Akses n8n Ditolak</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#171717">
+  <meta name="robots" content="noindex">
+  <title>{{TITLE}} · n8n</title>
+  <link rel="icon" href="/favicon.ico">
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: grid; place-items: center; min-height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 2rem 2.5rem; border-radius: 0.75rem; border: 1px solid #ef4444; text-align: center; max-width: 440px; }
-    h2 { margin: 0 0 0.5rem; font-size: 1.25rem; color: #ef4444; }
-    p { margin: 0 0 1.5rem; color: #cbd5e1; font-size: 0.875rem; line-height: 1.4; }
-    a { display: inline-block; background: #334155; color: #f8fafc; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-size: 0.875rem; }
-    a:hover { background: #475569; }
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: #171717; color: #f2f2f2;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.4; }
+    .card { width: 100%; max-width: 466px; background: #222; border: 1px solid #353535; border-radius: 8px; padding: 32px; text-align: center; }
+    .brand { display: block; margin: 0 auto 22px; }
+    .icon { width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 50%; display: grid; place-items: center;
+      background: #2b1818; border: 1px solid #7a2a2a; color: #ff9b9b; font-size: 24px; font-weight: 600; }
+    h1 { margin: 0 0 10px; font-size: 24px; font-weight: 500; text-wrap: balance; }
+    p { margin: 0 0 24px; color: #b8b8b8; font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; text-wrap: pretty; }
+    .btn { display: block; width: 100%; height: 44px; line-height: 44px; border-radius: 6px; background: #f0752e; color: #fff; font-size: 15px; font-weight: 500; text-decoration: none; }
+    .btn:hover { background: #f58a4c; }
+    .btn:focus-visible { outline: 2px solid #f58a4c; outline-offset: 2px; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>Akses n8n Gagal</h2>
-    <p>%s</p>
-    <a href="/sso/login">Coba Login Kembali</a>
-  </div>
+  <main class="card" role="alert">
+    <img class="brand" src="/sso/assets/logo.svg" alt="n8n" width="170" height="48">
+    <div class="icon" aria-hidden="true">!</div>
+    <h1>{{TITLE}}</h1>
+    <p>{{MSG}}</p>
+    <a class="btn" href="/signin">Back to sign in</a>
+  </main>
 </body>
 </html>`
-	_, _ = fmt.Fprintf(w, tmpl, msg)
+	out := strings.ReplaceAll(tmpl, "{{TITLE}}", title)
+	out = strings.ReplaceAll(out, "{{MSG}}", html.EscapeString(msg))
+	_, _ = w.Write([]byte(out))
 }
 
 // tokenAuth enforces Bearer token authentication (or fallback to X-Admin-Token / Basic Auth).

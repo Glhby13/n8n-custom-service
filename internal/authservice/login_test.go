@@ -553,13 +553,13 @@ func TestOTPLabelMatchesKeycloaksOwn(t *testing.T) {
 	}
 }
 
-// The page shown right after a code-flow sign-in: neutral wording (no mention of Keycloak), the e-mail is escaped,
+// The page shown right after a code-flow sign-in: neutral English wording (no mention of Keycloak), the e-mail is escaped,
 // the browser id is handed to n8n, and the theme follows the sign-in page.
 func TestHandoffPageWordingAndEscaping(t *testing.T) {
 	rr := httptest.NewRecorder()
 	(&Server{}).renderHandoff(rr, `a<b>&"@lab.local`, "abc123")
 	body := rr.Body.String()
-	for _, want := range []string{"Autentikasi user AD berhasil untuk", "a&lt;b&gt;&amp;&#34;@lab.local", `localStorage.setItem("n8n-browserId", "abc123")`, "#f0752e", "prefers-reduced-motion"} {
+	for _, want := range []string{"AD user authentication successful for", "a&lt;b&gt;&amp;&#34;@lab.local", `localStorage.setItem("n8n-browserId", "abc123")`, "#f0752e", "prefers-reduced-motion"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("handoff page lacks %q", want)
 		}
@@ -571,5 +571,37 @@ func TestHandoffPageWordingAndEscaping(t *testing.T) {
 	}
 	if rr.Code != 200 || rr.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("got %d %v", rr.Code, rr.Header())
+	}
+}
+
+// The page that ends a failed code-flow sign-in: n8n theme, 403 reads "Access denied", anything else "Sign-in failed",
+// the message is escaped, and nothing internal (Keycloak, error text) reaches the user.
+func TestErrorPageKindsAndEscaping(t *testing.T) {
+	denied := httptest.NewRecorder()
+	(&Server{}).renderError(denied, http.StatusForbidden, msgNotAuthorized)
+	failed := httptest.NewRecorder()
+	(&Server{}).renderError(failed, http.StatusBadGateway, msgSignInFailed)
+	esc := httptest.NewRecorder()
+	(&Server{}).renderError(esc, http.StatusBadRequest, `<script>alert(1)</script>`)
+
+	if denied.Code != 403 || !strings.Contains(denied.Body.String(), "<h1>Access denied</h1>") || !strings.Contains(denied.Body.String(), msgNotAuthorized) {
+		t.Fatalf("denied page wrong: %d %s", denied.Code, denied.Body.String())
+	}
+	if failed.Code != 502 || !strings.Contains(failed.Body.String(), "<h1>Sign-in failed</h1>") {
+		t.Fatalf("failed page wrong: %d", failed.Code)
+	}
+	for _, rr := range []*httptest.ResponseRecorder{denied, failed, esc} {
+		b := rr.Body.String()
+		for _, want := range []string{`href="/signin"`, "#f0752e", `role="alert"`, "no-store"} {
+			if !strings.Contains(b+rr.Header().Get("Cache-Control"), want) {
+				t.Errorf("error page lacks %q", want)
+			}
+		}
+		if strings.Contains(b, "Keycloak") {
+			t.Error("error page must not mention Keycloak")
+		}
+	}
+	if strings.Contains(esc.Body.String(), "<script>alert") || !strings.Contains(esc.Body.String(), "&lt;script&gt;") {
+		t.Fatal("message was not escaped")
 	}
 }

@@ -26,6 +26,9 @@ var webFS embed.FS
 // msgNotAuthorized is shown whenever the account may not use n8n (no access role); it names no role and no system.
 const msgNotAuthorized = "Your account is not authorized to access this application. Please contact your administrator for assistance."
 
+// msgSignInFailed is the user-facing text for a sign-in that broke for a reason the user cannot fix; the cause is only in the log.
+const msgSignInFailed = "We couldn’t complete your sign-in. Please try again, and contact your administrator if the problem continues."
+
 const (
 	adminRole        = "n8n-admin"
 	maxUserFailures  = 5
@@ -177,7 +180,7 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 	if s.locked(in.Username, ip) {
 		w.Header().Set("Retry-After", "900")
 		s.log.Warn("ad sign-in locked", "user", in.Username)
-		writeErr(w, http.StatusTooManyRequests, "locked", "Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit.")
+		writeErr(w, http.StatusTooManyRequests, "locked", "Too many failed attempts. Try again in 15 minutes.")
 		return
 	}
 
@@ -193,14 +196,14 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 		}
 		s.failed(in.Username, ip)
 		s.log.Info("ad sign-in refused", "user", in.Username)
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "Username, password, atau kode authenticator tidak valid.")
+		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "The username, password, or authenticator code is not valid.")
 		return
 	case errors.Is(err, ErrAccessDenied):
 		writeErr(w, http.StatusForbidden, "access_denied", msgNotAuthorized)
 		return
 	case err != nil:
 		s.log.Error("ad sign-in backend", "err", err)
-		writeErr(w, http.StatusServiceUnavailable, "unavailable", "Layanan autentikasi tidak tersedia.")
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "The sign-in service is unavailable. Please try again later.")
 		return
 	}
 
@@ -215,7 +218,7 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 		has, kerr := s.kc.HasOTP(ctx, claims.Subject)
 		if kerr != nil {
 			s.log.Error("otp lookup failed", "user", in.Username, "err", kerr)
-			writeErr(w, http.StatusServiceUnavailable, "unavailable", "Layanan autentikasi tidak tersedia.")
+			writeErr(w, http.StatusServiceUnavailable, "unavailable", "The sign-in service is unavailable. Please try again later.")
 			return
 		}
 		if !has {
@@ -277,27 +280,27 @@ func (s *Server) handleLoginADSetup(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	e, state := s.enrol.attempt(in.SetupToken)
 	if state != enrolOK {
-		writeErr(w, http.StatusBadRequest, "invalid_or_expired_token", "Sesi pendaftaran kedaluwarsa. Silakan login kembali.")
+		writeErr(w, http.StatusBadRequest, "invalid_or_expired_token", "Your setup session has expired. Please sign in again.")
 		return
 	}
 	if s.locked(e.username, ip) {
 		w.Header().Set("Retry-After", "900")
-		writeErr(w, http.StatusTooManyRequests, "locked", "Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit.")
+		writeErr(w, http.StatusTooManyRequests, "locked", "Too many failed attempts. Try again in 15 minutes.")
 		return
 	}
 	if !validTOTP(e.raw, in.Code, time.Now()) {
 		s.failed(e.username, ip)
-		writeErr(w, http.StatusUnauthorized, "invalid_code", "Kode authenticator tidak valid. Coba lagi.")
+		writeErr(w, http.StatusUnauthorized, "invalid_code", "The authenticator code is not valid. Please try again.")
 		return
 	}
 	s.enrol.drop(in.SetupToken)
 	if err := s.kc.RegisterOTP(ctx, e.claims.Subject, e.raw); err != nil {
 		if errors.Is(err, errOTPExists) {
-			writeErr(w, http.StatusConflict, "otp_exists", "Akun ini sudah punya authenticator. Silakan login kembali.")
+			writeErr(w, http.StatusConflict, "otp_exists", "This account already has an authenticator. Please sign in again.")
 			return
 		}
 		s.log.Error("register otp in keycloak failed", "user", e.username, "err", err)
-		writeErr(w, http.StatusServiceUnavailable, "unavailable", "Gagal menyimpan authenticator di Keycloak.")
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "We couldn’t save your authenticator. Please try again.")
 		return
 	}
 	s.lim.reset("u:" + e.username)
@@ -321,7 +324,7 @@ func (s *Server) handleLoginLocal(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	if s.locked(in.Username, ip) {
 		w.Header().Set("Retry-After", "900")
-		writeErr(w, http.StatusTooManyRequests, "locked", "Terlalu banyak percobaan gagal. Coba lagi dalam 15 menit.")
+		writeErr(w, http.StatusTooManyRequests, "locked", "Too many failed attempts. Try again in 15 minutes.")
 		return
 	}
 	browserID := randomToken(16)
@@ -329,7 +332,7 @@ func (s *Server) handleLoginLocal(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err != nil:
 		s.log.Error("local sign-in backend", "err", err)
-		writeErr(w, http.StatusServiceUnavailable, "unavailable", "Server n8n tidak tersedia.")
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "n8n is unavailable. Please try again later.")
 	case cookie != nil:
 		s.lim.reset("u:" + in.Username)
 		s.log.Info("local sign-in ok", "user", in.Username)
@@ -337,11 +340,11 @@ func (s *Server) handleLoginLocal(w http.ResponseWriter, r *http.Request) {
 	case code == 998:
 		writeErr(w, http.StatusUnauthorized, "mfa_required")
 	case status == http.StatusTooManyRequests:
-		writeErr(w, http.StatusTooManyRequests, "locked", "Terlalu banyak percobaan. Coba lagi sebentar lagi.")
+		writeErr(w, http.StatusTooManyRequests, "locked", "Too many attempts. Please try again shortly.")
 	default:
 		s.failed(in.Username, ip)
 		s.log.Info("local sign-in refused", "user", in.Username)
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "Email atau password tidak valid.")
+		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "The email or password is not valid.")
 	}
 }
 
