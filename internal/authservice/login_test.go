@@ -444,6 +444,14 @@ func TestLoginPageAndAssets(t *testing.T) {
 			t.Fatalf("page lacks %q", want)
 		}
 	}
+	// the logo sits inside the card and the card is centred in the window, like the DrawSpace sign-in page
+	if c, b := strings.Index(body, `class="card"`), strings.Index(body, `class="brand"`); c < 0 || b < c {
+		t.Fatal("the logo must be inside the card")
+	}
+	css, _ := webFS.ReadFile("web/login.css")
+	if !strings.Contains(string(css), "align-items: center; justify-content: center") {
+		t.Fatal("the card must be centred in the window")
+	}
 	// n8n serves its own favicon at /favicon.ico (same origin, so the page CSP already allows it): no copy to keep in step
 	if !strings.Contains(body, `rel="icon" href="/favicon.ico"`) {
 		t.Fatal("the page must use n8n's own favicon")
