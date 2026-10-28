@@ -552,3 +552,24 @@ func TestOTPLabelMatchesKeycloaksOwn(t *testing.T) {
 		t.Fatal("realmName fallback wrong")
 	}
 }
+
+// The page shown right after a code-flow sign-in: neutral wording (no mention of Keycloak), the e-mail is escaped,
+// the browser id is handed to n8n, and the theme follows the sign-in page.
+func TestHandoffPageWordingAndEscaping(t *testing.T) {
+	rr := httptest.NewRecorder()
+	(&Server{}).renderHandoff(rr, `a<b>&"@lab.local`, "abc123")
+	body := rr.Body.String()
+	for _, want := range []string{"Autentikasi user AD berhasil untuk", "a&lt;b&gt;&amp;&#34;@lab.local", `localStorage.setItem("n8n-browserId", "abc123")`, "#f0752e", "prefers-reduced-motion"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("handoff page lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"Keycloak", "a<b>"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("handoff page must not contain %q", bad)
+		}
+	}
+	if rr.Code != 200 || rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("got %d %v", rr.Code, rr.Header())
+	}
+}

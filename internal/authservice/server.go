@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -295,22 +296,33 @@ func (s *Server) renderHandoff(w http.ResponseWriter, email, browserID string) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Membuka n8n...</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#171717">
+  <meta name="robots" content="noindex">
+  <title>Membuka n8n…</title>
+  <link rel="icon" href="/favicon.ico">
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: grid; place-items: center; min-height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 2rem 2.5rem; border-radius: 0.75rem; border: 1px solid #334155; text-align: center; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); max-width: 400px; }
-    h2 { margin: 0 0 0.5rem; font-size: 1.25rem; font-weight: 600; color: #38bdf8; }
-    p { margin: 0; color: #94a3b8; font-size: 0.875rem; }
-    .spinner { margin: 1.5rem auto 0; width: 24px; height: 24px; border: 3px solid #334155; border-top-color: #38bdf8; border-radius: 50%; animation: spin 1s linear infinite; }
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: #171717; color: #f2f2f2;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.4; }
+    .card { width: 100%; max-width: 466px; background: #222; border: 1px solid #353535; border-radius: 8px; padding: 32px; text-align: center; }
+    .brand { display: block; margin: 0 auto 24px; }
+    h1 { margin: 0 0 8px; font-size: 24px; font-weight: 500; text-wrap: balance; }
+    p { margin: 0; color: #b8b8b8; font-size: 15px; overflow-wrap: anywhere; }
+    p b { color: #f2f2f2; font-weight: 600; }
+    .spinner { margin: 28px auto 0; width: 28px; height: 28px; border: 3px solid #353535; border-top-color: #f0752e; border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-color: #f0752e; opacity: .6; } }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>Membuka n8n...</h2>
-    <p>Autentikasi SSO Keycloak berhasil untuk <b>{{EMAIL}}</b></p>
-    <div class="spinner"></div>
-  </div>
+  <main class="card" role="status" aria-live="polite">
+    <img class="brand" src="/sso/assets/logo.svg" alt="n8n" width="170" height="48">
+    <h1>Membuka n8n…</h1>
+    <p>Autentikasi user AD berhasil untuk <b>{{EMAIL}}</b></p>
+    <div class="spinner" aria-hidden="true"></div>
+  </main>
   <script>
     try {
       localStorage.setItem("n8n-browserId", "{{BROWSER_ID}}");
@@ -319,7 +331,7 @@ func (s *Server) renderHandoff(w http.ResponseWriter, email, browserID string) {
   </script>
 </body>
 </html>`
-	out := strings.ReplaceAll(tmpl, "{{EMAIL}}", email)
+	out := strings.ReplaceAll(tmpl, "{{EMAIL}}", html.EscapeString(email))
 	out = strings.ReplaceAll(out, "{{BROWSER_ID}}", browserID)
 	_, _ = w.Write([]byte(out))
 }

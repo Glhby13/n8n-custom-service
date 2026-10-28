@@ -602,6 +602,8 @@ modal kode setelah percobaan pertama (admin ber-OTP dapat terdeteksi lewat nama 
 OTP admin baru gagal dengan pesan "Gagal menyimpan authenticator di Keycloak"; login lain tetap jalan. Setelah mengubah role
 service account, restart pod `auth-service` (token service account disimpan di memori sampai kedaluwarsa).
 
+**Halaman peralihan setelah SSO kode-flow** (`/sso/callback`, `renderHandoff`): kartu gelap n8n (latar `#171717`, kartu `#222`, aksen oranye `#f0752e`, logo n8n di dalam kartu) berjudul "Membuka n8n…" dengan teks "Autentikasi user AD berhasil untuk <email>" dan spinner, lalu otomatis pindah ke `/` (±0,2 detik). Tanpa menyebut Keycloak, email di-escape, spinner berhenti bila `prefers-reduced-motion`. Login dari halaman *Sign in with AD BTN* tidak melewati halaman ini.
+
 **Tampilan**: kartu di tengah jendela dengan logo n8n di dalam kartu (seperti halaman login DrawSpace), tema gelap, favicon
 memakai `/favicon.ico` milik n8n sendiri (dilayani n8n, tidak ada salinan aset).
 
@@ -915,6 +917,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-28 | (login, halaman peralihan) | Halaman "Membuka n8n…" setelah SSO kode-flow disamakan dengan tema n8n (gelap, aksen oranye, logo di kartu), teks diganti "Autentikasi user AD berhasil untuk …" (tanpa Keycloak), email di-escape, `prefers-reduced-motion`; tes `TestHandoffPageWordingAndEscaping`. |
 | 2026-10-28 | (login, role di Keycloak) | **Penolakan "tanpa role `n8n-access`" kini dilakukan Keycloak**: sub-flow `n8n-direct-grant-deny-no-access` (Condition user role negate + Deny access, setelah Password) lewat `scripts/keycloak_require_access_role.py`. Keycloak membalas 401 + halaman HTML, dipetakan `auth-service` ke `ErrAccessDenied`; cek role di aplikasi dipertahankan sebagai lapis kedua (juga untuk callback SSO). Pesan penolakan diganti netral berbahasa Inggris: "Your account is not authorized to access this application. Please contact your administrator for assistance." (tanpa nama role/email/Keycloak). Jalur akun lokal tidak berubah. |
 | 2026-10-28 | (docs, skrip) | README: §8.1 env `auth-service`, §9.4 checklist penerapan di lingkungan lain, batasan (§13), keamanan (§12), tes (§14), dan struktur repo (§15) diperbarui; `scripts/keycloak_otp_setup.py` (periksa/siapkan Keycloak: flow Direct Grant + izin service account). |
 | 2026-10-28 | `4d6b69a` | Tampilan halaman login: kartu di tengah jendela dengan logo n8n di dalam kartu (seperti DrawSpace); favicon memakai `/favicon.ico` milik n8n (tanpa salinan aset). |
