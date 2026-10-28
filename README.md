@@ -46,7 +46,7 @@ Prinsip yang dijaga:
 |---|---|---|
 | Microservice 1: `git-sync-service` | Poller publish, sinkron ke GitLab/GitHub, API versi/rollback, proxy riwayat untuk panel Versions n8n (`/rest/workflow-history`) | `cmd/git-sync-service` |
 | Microservice 2: `sharing-service` | Paywall bypass & granular workflow sharing via native UI modal n8n (`/rest/workflows/:id/share` dan `/rest/settings`) | `cmd/sharing-service` |
-| Microservice 3: `auth-service` | Gerbang SSO OIDC Keycloak (`n8n-lab`, role `n8n-access`), JIT auto-provisioning, dan Account Takeover / Mapping akun lokal lama | `cmd/auth-service` |
+| Microservice 3: `auth-service` | Halaman login pengganti `/signin` (Sign in with AD BTN = Keycloak Direct Grant + OTP, Sign in with local account), gerbang SSO OIDC Keycloak (`n8n-lab`, role `n8n-access`), JIT auto-provisioning, dan Account Takeover / Mapping akun lokal lama ([§6.5](#65-autentikasi-sso-keycloak-role-admin--transfer-kepemilikan-auth-service), [§6.6](#66-halaman-login-n8n-sign-in-with-ad-btn--local-account)) | `cmd/auth-service` |
 | Image | Multi-target scratch Go binary (`harbor.lab.local/n8n-custom-service/<service>:<sha8>`, uid 65532, < 15 MB) | `Dockerfile` |
 | CI | Jenkins multibranch `n8n-custom-service`: lint, test, kaniko build 3 microservices & push ke Harbor, bump tag manifest | `Jenkinsfile` |
 | Helm Base | Generic base chart `helm-base-lab/n8n-custom-service` (Deployment, Service, Ingress) | `helm-base-lab/n8n-custom-service` |
@@ -202,6 +202,8 @@ Kesimpulannya, kalau endpoint daftar versi dan isi versi dijawab dari GitLab, to
 ### 5.2 Bagaimana request dialihkan
 
 ingress-nginx memilih **prefix path terpanjang**. Chart ini memasang Ingress kedua untuk host `n8n.dev.btn.co.id`, khusus path `/rest/workflow-history`, yang menuju service ini. Semua path lain tetap ke Ingress n8n (`/`). Tidak dipakai snippet annotation (dilarang di cluster ini), dan Ingress milik `n8n-new` tidak diubah. Pola yang sama dipakai Portal untuk `/portal-sso/` di host yang sama.
+
+Ingress `auth-service` memakai pola yang sama: `/sso` (Prefix), `/admin/api` (Prefix), dan **`/signin` (Exact)** untuk halaman login ([§6.6](#66-halaman-login-n8n-sign-in-with-ad-btn--local-account)). Ingress `sharing-service` memegang `/rest/settings`, `/assets/*`, dan `/rest/workflows/<id>/share`.
 
 ### 5.3 Autentikasi dan otorisasi
 
@@ -594,9 +596,14 @@ dan 20 per IP dalam 15 menit (memori pod); redirect dibatasi path same-site; pes
 `invalid_grant` yang sama untuk password salah dan kode OTP belum dikirim, jadi untuk admin ber-OTP halaman menampilkan
 modal kode setelah percobaan pertama (admin ber-OTP dapat terdeteksi lewat nama pengguna; dibatasi oleh pembatasan percobaan).
 
-**Prasyarat Keycloak** (idempoten, `scripts/n8n/provision_login_flow.py` di repo lab): service account `n8n-lab` perlu
-realm-management `view-users` (sudah mencakup `query-users`), `view-clients`, dan **`manage-users`** (tulis OTP). Tanpa
-`manage-users`, pendaftaran OTP admin baru gagal dengan pesan "Gagal menyimpan authenticator di Keycloak"; login lain tetap jalan.
+**Prasyarat Keycloak**: client, flow Direct Grant, dan izin service account diperiksa/disiapkan oleh
+`scripts/keycloak_otp_setup.py` (lihat [§9.4](#94-menerapkan-halaman-login-di-lingkungan-lain-checklist)). Service account perlu
+`view-users` (mencakup `query-users`), `view-clients`, dan **`manage-users`** (menulis OTP). Tanpa `manage-users`, pendaftaran
+OTP admin baru gagal dengan pesan "Gagal menyimpan authenticator di Keycloak"; login lain tetap jalan. Setelah mengubah role
+service account, restart pod `auth-service` (token service account disimpan di memori sampai kedaluwarsa).
+
+**Tampilan**: kartu di tengah jendela dengan logo n8n di dalam kartu (seperti halaman login DrawSpace), tema gelap, favicon
+memakai `/favicon.ico` milik n8n sendiri (dilayani n8n, tidak ada salinan aset).
 
 Tes: `internal/authservice/login_test.go` (Keycloak dan n8n palsu: user biasa, kode salah, enrolment penuh sampai Keycloak
 memverifikasi, token sekali pakai/kedaluwarsa, OTP tidak ditimpa, lockout, akun lokal, header halaman, redirect) dan
@@ -662,6 +669,24 @@ Nilai non-rahasia ada di ConfigMap (values Helm). Tiga rahasia diambil dari Secr
 | `N8N_PAGE_SIZE` | `100` | |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `20` | |
 
+### 8.1 `auth-service`
+
+Nilai non-rahasia ada di ConfigMap, rahasia di Secret `n8n-auth-service-secret`. Di lingkungan selain lab, **semua rahasia wajib
+diisi dari Secret** (default di kode hanya untuk pengembangan lab).
+
+| Variabel | Default | Keterangan |
+|---|---|---|
+| `PORT` / `LOG_LEVEL` | `8080` / `info` | |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_SSLMODE` | `5432`, `n8n_db`, `lab_worker`, `disable` | database n8n (hanya `"user"`, `project`, `shared_workflow`, `shared_credentials`, dan tabel mapping milik service); isi `DB_USER` sesuai lingkungan. Atau satu `DB_URL` |
+| `DB_PASSWORD` | wajib (Secret) | |
+| `KEYCLOAK_URL` | URL realm | `https://<keycloak>/realms/<realm>` |
+| `OIDC_CLIENT_ID` | `n8n-lab` | client confidential dengan Direct Access Grants dan Service accounts aktif |
+| `OIDC_CLIENT_SECRET` | wajib (Secret) | juga dipakai membuat password terkelola akun SSO: mengganti nilainya aman |
+| `OIDC_REDIRECT_URL` | `<host n8n>/sso/callback` | hanya untuk alur code lama (`/sso/login`) |
+| `N8N_BASE_URL` / `N8N_PUBLIC_URL` | alamat internal / publik n8n | `/rest/login` dipanggil lewat alamat internal |
+| `ADMIN_API_TOKEN` | wajib (Secret) | bearer untuk `/admin/api/*` |
+| `OTP_ISSUER` | nama realm dari `KEYCLOAK_URL` | penerbit yang tampil di aplikasi authenticator (`<OTP_ISSUER>:<username>`). **Isi dengan nama tampilan realm** (mis. `Lab`) agar sama dengan halaman Keycloak |
+
 **Mengubah setting**: edit `app-of-apps/helm-values/platform-manifest/n8n-git-service/values-common.yaml` (berlaku umum) atau `values-env-dev.yaml` (khusus dev), lalu push. ArgoCD akan sync. Perubahan ConfigMap mengubah checksum, sehingga pod otomatis restart.
 
 **Menambah owner/repo baru:**
@@ -713,6 +738,26 @@ Repo ArgoCD/registrasi repo di `common-k8s-resources/values-controlplane-*` **ti
 - Repo `n8n-pluto`/`n8n-ai` berisi commit baseline (rekonsiliasi saat start).
 - Request tanpa login ke `https://n8n.dev.btn.co.id/rest/workflow-history/workflow/<id>` mendapat `401` **dengan** header `X-Request-Id`. Header itu menandakan request dilayani service ini.
 - Panel Versions di editor menampilkan `GitLab <sha7>`.
+
+### 9.4 Menerapkan halaman login di lingkungan lain (checklist)
+
+Berlaku untuk lingkungan baru (mis. kantor). Tanpa DDL, tanpa tabel baru, DB n8n tidak diubah. Urutan:
+
+1. **Keycloak** (realm yang dipakai SSO n8n):
+   - client confidential `OIDC_CLIENT_ID`: *Direct Access Grants* aktif, *Service accounts roles* aktif, mapper client role → `resource_access`;
+   - client role `n8n-access`, `n8n-admin`, `n8n-user`; grup `n8n` (role `n8n-access`), `n8n/n8n-admin`, `n8n/n8n-user`;
+   - flow Direct Grant khusus client (Advanced → Authentication flow overrides → Direct grant flow): `Username Validation` (REQUIRED) → `Password` (REQUIRED) → sub-flow **CONDITIONAL** berisi `Condition - user role` (role `<client>.n8n-admin`), `Condition - user configured`, `OTP` (semuanya REQUIRED);
+   - jalankan `python3 -I scripts/keycloak_otp_setup.py --check`: memeriksa client dan struktur flow (hanya membaca) dan izin service account. Tanpa `--check`, skrip memberi izin yang kurang (`view-users`, `query-users`, `manage-users`, `view-clients`, `query-clients`; idempoten). Env: `KC_URL`, `KC_REALM`, `KC_CLIENT`, `KC_ADMIN_ROLE`, `KC_ADMIN_PASSWORD` (kalau kosong ditanya di terminal), `KC_INSECURE=1` hanya untuk sertifikat self-signed.
+2. **Secret** `n8n-auth-service-secret`: `DB_PASSWORD`, `OIDC_CLIENT_SECRET`, `ADMIN_API_TOKEN`.
+3. **Values `auth-service`**: env [§8.1](#81-auth-service), terutama `OTP_ISSUER` = nama tampilan realm.
+4. **Deploy, urutan penting**: push kode, tunggu Jenkins hijau dan rollout `auth-service` dan `sharing-service` selesai (`kubectl rollout status`), **baru** tambahkan path `/signin` (Exact) ke Ingress `auth-service` untuk host n8n. Sebelum ingress ditambah, `/signin` tetap dilayani n8n (aman).
+5. **Verifikasi**:
+   - membuka `/` saat belum login berpindah ke `/signin?ad=1&...` dan menampilkan halaman baru (kartu di tengah, logo di dalam kartu, favicon n8n);
+   - user biasa (`n8n-access`) masuk tanpa kode; admin ber-OTP diminta 6 digit; admin tanpa OTP melihat QR lalu masuk, dan di Keycloak Admin user itu punya kredensial OTP berlabel "Authenticator";
+   - entri di aplikasi authenticator berjudul `<OTP_ISSUER>:<username>`;
+   - akun lokal masuk lewat *Sign in with local account*;
+   - log `sharing-service` tidak berisi `signin view patch did not apply`.
+6. **Undo**: hapus path `/signin` dari ingress (halaman bawaan n8n kembali), atau deploy image sebelumnya. OTP yang sudah terdaftar di Keycloak tetap sah.
 
 ## 10. Rilis, milestone, dan rollback service
 
@@ -768,6 +813,7 @@ Repo ArgoCD/registrasi repo di `common-k8s-resources/values-controlplane-*` **ti
   - URL hanya dari konfigurasi, redirect dimatikan, timeout
   - TLS selalu diverifikasi (≥ 1.2), dan GitLab wajib https
 - **Container**: `FROM scratch`, non-root 65532, root filesystem read-only, semua capability di-drop, seccomp `RuntimeDefault`, token ServiceAccount tidak di-mount.
+- **Halaman login** (`auth-service`): CSP `script-src 'self'` tanpa inline, `X-Frame-Options: DENY`, `no-store`; redirect hanya path same-site; pesan error generik; 5 gagal per user dan 20 per IP dalam 15 menit; secret OTP baru hanya di memori pod (5 menit, sekali pakai, maks. 5 percobaan) dan ditulis ke Keycloak hanya setelah kode pertama terbukti; OTP yang sudah ada tidak pernah ditimpa; password pengguna tidak pernah dicatat.
 
 ## 13. Batasan yang diketahui
 
@@ -780,6 +826,10 @@ Repo ArgoCD/registrasi repo di `common-k8s-resources/values-controlplane-*` **ti
 - Pada mode `git-only` hanya draft **saat ini** yang tampil (bila berbeda dari published). Riwayat autosave lainnya tidak tampil; pakai `merged` kalau perlu.
 - Restore di panel tidak tersedia untuk entri paling atas (perilaku n8n).
 - Kalau `network-isolation` diterapkan ke `platform-dev`, egress ke GitLab (443) harus diizinkan.
+- **Halaman login bergantung pada bundle SPA n8n** (chunk `SigninView`, n8n 2.28.6) untuk navigasi sisi klien. Cek ulang setiap upgrade n8n; bila penanda tidak cocok, `sharing-service` mencatat `signin view patch did not apply` dan halaman bawaan n8n tetap dipakai (login tidak putus).
+- **Pembatasan percobaan dan token pendaftaran OTP ada di memori pod**: cukup untuk satu replika; restart pod mengosongkannya (admin tinggal login ulang). Bila `auth-service` dijalankan lebih dari satu replika, perlu penyimpanan bersama (mis. Redis).
+- **Keycloak membalas `invalid_grant` yang sama** untuk password salah dan kode OTP yang belum dikirim, sehingga admin ber-OTP dapat dikenali lewat nama pengguna setelah percobaan pertama (dibatasi oleh pembatasan percobaan).
+- **OTP milik user, bukan milik aplikasi**: kredensial yang didaftarkan di n8n juga dipakai aplikasi Keycloak lain yang flow-nya meminta OTP; menghapusnya di Keycloak berlaku untuk semuanya.
 
 ## 14. Pengembangan lokal dan testing
 
@@ -805,6 +855,11 @@ Tes memakai `httptest` dan fake di memori, sehingga tidak pernah memanggil n8n a
   - otorisasi lewat sesi n8n dan cache-nya
   - fail-open, passthrough
 - redaksi log
+- halaman login (`internal/authservice/login_test.go`, Keycloak dan n8n palsu):
+  - user biasa, kode salah, role `n8n-access` wajib, lockout, akun lokal beserta tantangan MFA n8n
+  - pendaftaran OTP penuh: QR muncul, kode salah tidak mendaftar, kode benar menulis ke Keycloak, token sekali pakai dan kedaluwarsa, Keycloak lalu meminta dan memverifikasi kode
+  - OTP yang ada tidak pernah ditimpa; label QR = `<issuer>:<username>`; redirect dan header halaman; logo di dalam kartu dan favicon n8n
+- tambalan chunk `SigninView` (`internal/shareproxy/signin_patch_test.go`): terpasang, idempoten, chunk lain tidak disentuh
 
 Lingkungan lokal dengan mock n8n + GitLab (HTTPS dengan CA self-signed):
 
@@ -821,20 +876,25 @@ Discovery API n8n yang asli (read-only, key dari env atau stdin, tidak dicetak):
 ## 15. Struktur repo
 
 ```
-cmd/n8n-git-service/      main (wiring) + subcommand healthcheck
-internal/config/          env → Config + validasi
+cmd/git-sync-service/     sinkron ke Git, API versi/rollback, proxy riwayat (healthcheck subcommand)
+cmd/sharing-service/      paywall bypass + sharing granular, penambal aset n8n (/rest/settings, /assets/*)
+cmd/auth-service/         SSO, halaman login, Admin API, CLI read-only (healthcheck subcommand)
+internal/config/          env → Config + validasi (git-sync-service)
 internal/httpx/           middleware (request id, recover, access log, bearer, limit), logger JSON + redaksi
 internal/n8n/             klien API publik n8n
-internal/gitlab/          klien GitLab REST (files, commits, last_commit_id)
+internal/gitlab/ github/  klien GitLab / GitHub REST (files, commits, last_commit_id)
 internal/workflow/        sanitasi, kanonikalisasi, __lines__, restore body, payload versi
 internal/service/         publish, poller, versions, rollback, riwayat Git, handler /api/v1
 internal/historyproxy/    proxy /rest/workflow-history untuk panel Versions n8n
-internal/audit/           log audit
-internal/metrics/         metrik Prometheus
+internal/shareproxy/      sharing + /rest/settings + penambal chunk SigninView (signin_patch_test.go)
+internal/authservice/     auth-service: keycloak.go (Direct Grant, Admin API, OTP), login.go (halaman + JSON), totp.go,
+                          server.go (callback SSO, sesi n8n, Admin API), db.go (mapping, JIT user), web/ (halaman login)
+internal/audit/ metrics/  log audit, metrik Prometheus
 api/openapi.yaml          kontrak API
 deploy/local/             compose + mock n8n/GitLab
 docs/                     discovery n8n 2.28.6
 scripts/discover.sh       discovery read-only
+scripts/keycloak_otp_setup.py  periksa/siapkan sisi Keycloak untuk halaman login (§9.4)
 Dockerfile, Jenkinsfile, .golangci.yml
 ```
 
@@ -855,6 +915,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-28 | (docs, skrip) | README: §8.1 env `auth-service`, §9.4 checklist penerapan di lingkungan lain, batasan (§13), keamanan (§12), tes (§14), dan struktur repo (§15) diperbarui; `scripts/keycloak_otp_setup.py` (periksa/siapkan Keycloak: flow Direct Grant + izin service account). |
 | 2026-10-28 | `4d6b69a` | Tampilan halaman login: kartu di tengah jendela dengan logo n8n di dalam kartu (seperti DrawSpace); favicon memakai `/favicon.ico` milik n8n (tanpa salinan aset). |
 | 2026-10-28 | (login, label) | Label QR OTP mengikuti Keycloak (`Lab:<username>`, env `OTP_ISSUER`), label kredensial netral "Authenticator". |
 | 2026-10-28 | (login) | **Halaman login n8n baru** di `auth-service` (`/signin`): Sign in with AD BTN (Keycloak Direct Grant, modal TOTP/QR di halaman, OTP didaftarkan sebagai kredensial OTP asli Keycloak) dan Sign in with local account (`/rest/login` n8n), tanpa Forgot password; tambalan `SigninView` di `sharing-service`; ingress `/signin`. Lihat §6.6. |
