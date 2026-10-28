@@ -557,6 +557,45 @@ Login SSO (Keycloak) mengamankan akses ke n8n Community dengan pemetaan identita
 
 Catatan: user DB (`lab_worker` di lab, `platform_worker` di kantor) harus boleh `UPDATE` tabel `"user"`, `project`, `shared_workflow`, dan `shared_credentials` di `n8n_db`; kalau `map-user` gagal "permission denied", periksa hak itu. Mengganti `OIDC_CLIENT_SECRET` aman: password terkelola ditimpa setiap login.
 
+### 6.6 Halaman login n8n: Sign in with AD BTN / local account
+
+Halaman `/signin` n8n diganti dengan halaman milik `auth-service`, tanpa mengubah n8n, database n8n, atau
+membuka halaman Keycloak. Tampilannya meniru n8n (logo, kartu gelap), tanpa "Forgot my password".
+
+| Tombol | Endpoint | Cara kerja |
+|---|---|---|
+| **Sign in with AD BTN** (oranye, juga tombol Enter) | `POST /sso/login/ad` | Keycloak Direct Grant client `n8n-lab` (flow `n8n-direct-grant`). User biasa langsung masuk. Admin (`n8n-admin`) yang sudah punya OTP di Keycloak diminta 6 digit lewat modal; **Keycloak** yang memverifikasi. Setelah lolos, alurnya sama dengan callback SSO (cek role `n8n-access`, JIT user, sinkron role, `/rest/login`). |
+| **Sign in with local account** (abu-abu) | `POST /sso/login/local` | Meneruskan email/password ke `/rest/login` n8n. Bila n8n meminta kode MFA bawaan (kode 998), modal 6 digit muncul dan kode diteruskan ke n8n. |
+
+**Admin yang belum punya OTP** (misal user biasa yang baru diangkat jadi `n8n-admin`): Keycloak meloloskan password
+(flow hanya meminta OTP bila user sudah punya kredensial OTP), `auth-service` melihat role `n8n-admin` tanpa OTP, lalu
+membuat secret dan QR dan menampilkannya di modal. Secret **hanya di memori pod** (5 menit, sekali pakai, maks. 5 percobaan).
+Setelah 6 digit pertama benar, secret ditulis ke **Keycloak sebagai kredensial OTP asli** lewat Admin API
+(`PUT /users/{id}` dengan `credentials[type=otp]`; `secretData.value` = secret **mentah**, QR memakai base32-nya). Mulai
+saat itu setiap login admin diverifikasi Keycloak. OTP yang sudah ada tidak pernah ditimpa (`RegisterOTP` menolak).
+Tidak ada tabel atau DB baru; DB n8n tidak disentuh.
+
+**Cara halaman ini muncul.** SPA n8n pindah ke `/signin` di sisi klien, jadi ingress saja tidak cukup:
+1. `sharing-service` (asset-proxy `/assets/*`) menyisipkan satu baris di awal komponen `SigninView` (chunk
+   `SigninView-<hash>.js`, dicari lewat nama komponen `SigninView` pada `__name:`) yang melakukan
+   `location.replace("/signin?ad=1&...")`. Penanda `ad=1` mencegah loop.
+2. Ingress `/signin` (Exact) ke `auth-service` menyajikan halaman. Akses langsung atau reload `/signin` juga mendarat di sini.
+3. Bila tambalan tidak cocok setelah upgrade n8n, `sharing-service` mencatat peringatan
+   `signin view patch did not apply` dan halaman bawaan n8n tetap berfungsi (login tidak putus).
+
+**Keamanan.** CSP ketat (`script-src 'self'`, tanpa inline), `X-Frame-Options: DENY`, `no-store`; pembatasan 5 gagal per user
+dan 20 per IP dalam 15 menit (memori pod); redirect dibatasi path same-site; pesan error generik. Catatan: Keycloak membalas
+`invalid_grant` yang sama untuk password salah dan kode OTP belum dikirim, jadi untuk admin ber-OTP halaman menampilkan
+modal kode setelah percobaan pertama (admin ber-OTP dapat terdeteksi lewat nama pengguna; dibatasi oleh pembatasan percobaan).
+
+**Prasyarat Keycloak** (idempoten, `scripts/n8n/provision_login_flow.py` di repo lab): service account `n8n-lab` perlu
+realm-management `view-users` (sudah mencakup `query-users`), `view-clients`, dan **`manage-users`** (tulis OTP). Tanpa
+`manage-users`, pendaftaran OTP admin baru gagal dengan pesan "Gagal menyimpan authenticator di Keycloak"; login lain tetap jalan.
+
+Tes: `internal/authservice/login_test.go` (Keycloak dan n8n palsu: user biasa, kode salah, enrolment penuh sampai Keycloak
+memverifikasi, token sekali pakai/kedaluwarsa, OTP tidak ditimpa, lockout, akun lokal, header halaman, redirect) dan
+`internal/shareproxy/signin_patch_test.go`.
+
 ## 7. REST API service
 
 Semua `/api/v1/*` wajib memakai `Authorization: Bearer <SERVICE_API_TOKEN>` (dibandingkan constant-time). Kontrak lengkap ada di [api/openapi.yaml](api/openapi.yaml).
@@ -810,6 +849,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 | 2026-10-20 | `480d069` | `formatVersion: 2` di setiap file + deteksi commit "hanya format"; rollout memigrasi semua workflow published sekali (judul = nama workflow). |
 | 2026-10-23 | `3d2528a` | Injeksi pengaturan OIDC enterprise di sharing-service (`/rest/settings`) sehingga tombol native "Sign in with SSO / OIDC" otomatis tampil di UI `/signin` n8n, serta dukungan dual login (SSO Keycloak & password lokal n8n). |
 | 2026-10-23 | (auth-service) | Penambahan microservice ke-3: **`auth-service`** untuk OIDC Keycloak SSO (client `n8n-lab`, role `n8n-access`), JIT user auto-provisioning, dan fitur Account Takeover / Mapping akun lokal n8n lama (CLI `map-user` & API) tanpa kehilangan aset workflow/credentials. |
+| 2026-10-28 | (login) | **Halaman login n8n baru** di `auth-service` (`/signin`): Sign in with AD BTN (Keycloak Direct Grant, modal TOTP/QR di halaman, OTP didaftarkan sebagai kredensial OTP asli Keycloak) dan Sign in with local account (`/rest/login` n8n), tanpa Forgot password; tambalan `SigninView` di `sharing-service`; ingress `/signin`. Lihat §6.6. |
 | 2026-10-26 | (auth-service) | Penambahan Endpoint REST API Manajemen: Enable/Disable status pengguna (`POST /admin/api/v1/users/{email}/status`), Delete pengguna (`DELETE /admin/api/v1/users/{email}`) dengan proteksi aset dan opsi `?force=true`, pencegahan overwrite status disabled pada login SSO, serta penolakan login SSO (HTTP 403 Forbidden) bila akun berstatus disabled. |
 | 2026-10-26 | (auth-service) | Security hardening: Token-Based Identity (Bearer token via `ADMIN_API_TOKEN`), penonaktifan mutasi akun di exec pod CLI (Single Door of Entry), sinkronisasi otomatis role Admin Keycloak (group `n8n-admin` $\rightarrow$ `global:admin`, `n8n-user` $\rightarrow$ `global:member`), serta REST API `/admin/api/v1/transfer-ownership` & `/admin/api/v1/users`. |
 | 2026-10-23 | (docs) | Panduan mapping akun SSO ke akun n8n lama (CLI `kubectl exec ... /app map-user`, Admin API, perilaku dua skenario) ditambahkan di §6.5. |

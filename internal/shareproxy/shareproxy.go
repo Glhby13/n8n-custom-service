@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -431,6 +432,14 @@ func (h *Handler) handleAssetProxy(w http.ResponseWriter, r *http.Request) {
 		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"Continue with SSO"`), []byte(`"Sign in with AD BTN"`))
 		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`'Continue with SSO'`), []byte(`'Sign in with AD BTN'`))
 		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"sso.login.button":"Continue with SSO"`), []byte(`"sso.login.button":"Sign in with AD BTN"`))
+		if strings.HasPrefix(r.URL.Path, "/assets/SigninView-") && strings.HasSuffix(r.URL.Path, ".js") {
+			patched, ok := patchSigninView(bodyBytes)
+			if !ok {
+				// n8n changed the sign-in view: keep its own page working rather than break sign-in.
+				h.log.Warn("signin view patch did not apply; n8n native sign-in page stays", "path", r.URL.Path)
+			}
+			bodyBytes = patched
+		}
 	}
 
 	for k, vv := range resp.Header {
@@ -446,4 +455,27 @@ func (h *Handler) handleAssetProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(bodyBytes)
+}
+
+// signinSetup finds the start of n8n's sign-in view component (stable across builds: the component name is part of
+// n8n's source, only the minified parameter name and the chunk hash change).
+var signinSetup = regexp.MustCompile("__name:`SigninView`,setup\\([^)]*\\)\\{")
+
+// signinRedirect is injected at the start of the sign-in view. When n8n's router lands on /signin (client side, so no
+// request ever reaches the server) it does one full-page navigation to /signin?ad=1..., which the ingress sends to
+// auth-service, which serves the AD BTN / local account sign-in page. The ad=1 marker stops a loop: if the ingress
+// route is missing the request comes back to n8n with the marker and the native page simply renders.
+const signinRedirect = "if(!/[?&]ad=1(&|$)/.test(location.search)){location.replace(\"/signin?ad=1\"+(location.search?\"&\"+location.search.slice(1):\"\"));return()=>null}"
+
+// patchSigninView returns the sign-in chunk with the redirect injected, and whether it applied.
+func patchSigninView(body []byte) ([]byte, bool) {
+	loc := signinSetup.FindIndex(body)
+	if loc == nil || bytes.Contains(body, []byte(signinRedirect)) {
+		return body, bytes.Contains(body, []byte(signinRedirect))
+	}
+	out := make([]byte, 0, len(body)+len(signinRedirect))
+	out = append(out, body[:loc[1]]...)
+	out = append(out, signinRedirect...)
+	out = append(out, body[loc[1]:]...)
+	return out, true
 }

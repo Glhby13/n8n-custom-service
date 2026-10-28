@@ -24,9 +24,22 @@ import (
 type Server struct {
 	cfg        *Config
 	db         *DB
+	users      userStore
 	oidc       *OIDCClient
+	kc         *keycloakAdmin
 	httpClient *http.Client
 	log        *slog.Logger
+	enrol      *enrolStore
+	lim        *limiter
+}
+
+// userStore is the part of the n8n database the sign-in flow needs (satisfied by *DB).
+type userStore interface {
+	GetMapping(ctx context.Context, oidcEmail string) (*MappingRecord, error)
+	IsUserDisabled(ctx context.Context, email string) (bool, error)
+	EnsureUserExists(ctx context.Context, email, firstName, lastName string) error
+	SyncUserRole(ctx context.Context, email, targetRole string) error
+	EnsureManagedPassword(ctx context.Context, email, plainPassword string) error
 }
 
 // NewServer creates a new Server instance.
@@ -35,9 +48,13 @@ func NewServer(cfg *Config, db *DB, log *slog.Logger) *Server {
 	return &Server{
 		cfg:        cfg,
 		db:         db,
+		users:      db,
 		oidc:       oidc,
+		kc:         newKeycloakAdmin(oidc),
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		log:        log.With("component", "auth-server"),
+		enrol:      newEnrolStore(),
+		lim:        newLimiter(),
 	}
 }
 
@@ -60,6 +77,9 @@ func (s *Server) Handler() http.Handler {
 	// OIDC SSO Endpoints
 	mux.HandleFunc("GET /sso/login", s.handleSSOLogin)
 	mux.HandleFunc("GET /sso/callback", s.handleSSOCallback)
+
+	// Sign-in page (served in place of n8n's own /signin) and its JSON endpoints.
+	s.registerLogin(mux)
 
 	// Admin API Endpoints (Token-based Bearer authentication)
 	mux.HandleFunc("POST /admin/api/v1/transfer-ownership", s.tokenAuth(s.handleTransferOwnership))
@@ -122,33 +142,68 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if claims.Email == "" {
-		s.renderError(w, http.StatusBadRequest, "Akun Keycloak Anda tidak memiliki alamat email.")
+	res, fail := s.establishSession(ctx, claims)
+	if fail != nil {
+		s.renderError(w, fail.status, fail.msg)
 		return
+	}
+	http.SetCookie(w, n8nSessionCookie(res.cookie))
+	s.renderHandoff(w, res.email, res.browserID)
+}
+
+// loginFailure is a refused sign-in with the HTTP status and the message to show.
+type loginFailure struct {
+	status int
+	msg    string
+}
+
+// loginResult is a signed-in n8n session: the cookie n8n issued and the browser id the SPA must store.
+type loginResult struct {
+	cookie    *http.Cookie
+	browserID string
+	email     string
+}
+
+func n8nSessionCookie(c *http.Cookie) *http.Cookie {
+	return &http.Cookie{
+		Name:     "n8n-auth",
+		Value:    c.Value,
+		Path:     "/",
+		MaxAge:   7 * 24 * 3600,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// establishSession turns verified Keycloak claims into an n8n session: role gate, mapping, disabled check, JIT user,
+// role sync, managed password, then n8n's own /rest/login for the official cookie. It is shared by the code flow
+// callback and the direct sign-in page.
+func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*loginResult, *loginFailure) {
+	if claims.Email == "" {
+		return nil, &loginFailure{http.StatusBadRequest, "Akun Keycloak Anda tidak memiliki alamat email."}
 	}
 
 	// 2. Enforce Role: n8n-access
 	if !claims.HasRole("n8n-access") {
 		s.log.Warn("user lacks required role n8n-access", "user", claims.Email, "roles", claims.Roles)
-		s.renderError(w, http.StatusForbidden, "Akses ditolak: Akun "+claims.Email+" tidak memiliki role 'n8n-access' di Keycloak.")
-		return
+		return nil, &loginFailure{http.StatusForbidden, "Akses ditolak: Akun " + claims.Email + " tidak memiliki role 'n8n-access' di Keycloak."}
 	}
 
 	s.log.Info("oidc authentication successful", "email", claims.Email, "roles", claims.Roles)
 
 	// 3. Resolve target n8n account (Check mapping)
 	targetEmail := claims.Email
-	mapping, err := s.db.GetMapping(ctx, claims.Email)
+	mapping, err := s.users.GetMapping(ctx, claims.Email)
 	if err == nil && mapping != nil && mapping.TargetN8nEmail != "" {
 		targetEmail = mapping.TargetN8nEmail
 		s.log.Info("oidc user mapped to existing n8n account", "oidc", claims.Email, "target", targetEmail)
 	}
 
 	// 3b. Check if user account is disabled in n8n_db
-	if isDisabled, err := s.db.IsUserDisabled(ctx, targetEmail); err == nil && isDisabled {
+	if isDisabled, err := s.users.IsUserDisabled(ctx, targetEmail); err == nil && isDisabled {
 		s.log.Warn("disabled user attempted sso login", "email", targetEmail)
-		s.renderError(w, http.StatusForbidden, "Akses ditolak: Akun "+targetEmail+" telah dinonaktifkan oleh Administrator.")
-		return
+		return nil, &loginFailure{http.StatusForbidden, "Akses ditolak: Akun " + targetEmail + " telah dinonaktifkan oleh Administrator."}
 	}
 
 	// 4. Ensure target user exists in n8n_db (JIT provisioning)
@@ -157,10 +212,9 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		fName = claims.Name
 	}
 	lName := claims.FamilyName
-	if err := s.db.EnsureUserExists(ctx, targetEmail, fName, lName); err != nil {
+	if err := s.users.EnsureUserExists(ctx, targetEmail, fName, lName); err != nil {
 		s.log.Error("ensure user exists failed", "email", targetEmail, "err", err)
-		s.renderError(w, http.StatusInternalServerError, "Gagal memverifikasi akun di database n8n.")
-		return
+		return nil, &loginFailure{http.StatusInternalServerError, "Gagal memverifikasi akun di database n8n."}
 	}
 
 	// 4b. Sync role with Keycloak (claims.HasRole("n8n-admin") -> global:admin, else global:member)
@@ -168,7 +222,7 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	if claims.HasRole("n8n-admin") {
 		targetRole = "global:admin"
 	}
-	if err := s.db.SyncUserRole(ctx, targetEmail, targetRole); err != nil {
+	if err := s.users.SyncUserRole(ctx, targetEmail, targetRole); err != nil {
 		s.log.Warn("sync user role failed", "email", targetEmail, "role", targetRole, "err", err)
 	} else {
 		s.log.Info("user role synced successfully", "email", targetEmail, "role", targetRole)
@@ -181,10 +235,9 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	h.Write([]byte(strings.ToLower(targetEmail)))
 	managedPass := "N8nSsoPass_" + hex.EncodeToString(h.Sum(nil))[:24] + "#"
 
-	if err := s.db.EnsureManagedPassword(ctx, targetEmail, managedPass); err != nil {
+	if err := s.users.EnsureManagedPassword(ctx, targetEmail, managedPass); err != nil {
 		s.log.Error("ensure managed password failed", "email", targetEmail, "err", err)
-		s.renderError(w, http.StatusInternalServerError, "Gagal memperbarui kredensial n8n internal.")
-		return
+		return nil, &loginFailure{http.StatusInternalServerError, "Gagal memperbarui kredensial n8n internal."}
 	}
 
 	// 6. Login to internal n8n via /rest/login to obtain official session cookie
@@ -195,22 +248,9 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	n8nCookie, err := s.loginN8n(ctx, targetEmail, managedPass, browserID)
 	if err != nil {
 		s.log.Error("internal n8n login failed", "email", targetEmail, "err", err)
-		s.renderError(w, http.StatusBadGateway, "Gagal login ke server n8n internal: "+err.Error())
-		return
+		return nil, &loginFailure{http.StatusBadGateway, "Gagal login ke server n8n internal: " + err.Error()}
 	}
-
-	// 7. Render Handoff Page with n8n-auth cookie and localStorage browserId
-	http.SetCookie(w, &http.Cookie{
-		Name:     "n8n-auth",
-		Value:    n8nCookie.Value,
-		Path:     "/",
-		MaxAge:   7 * 24 * 3600,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	s.renderHandoff(w, targetEmail, browserID)
+	return &loginResult{cookie: n8nCookie, browserID: browserID, email: targetEmail}, nil
 }
 
 func (s *Server) loginN8n(ctx context.Context, email, password, browserID string) (*http.Cookie, error) {

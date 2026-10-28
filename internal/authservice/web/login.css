@@ -1,0 +1,52 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: #171717; color: #f2f2f2;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px; line-height: 1.4;
+}
+.shell { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 48px 16px; gap: 28px; }
+.brand { display: block; }
+.card {
+  width: 100%; max-width: 466px; background: #222; border: 1px solid #353535; border-radius: 8px; padding: 32px;
+}
+h1 { margin: 0 0 28px; font-size: 24px; font-weight: 500; text-align: center; }
+label { display: block; margin: 0 0 8px; font-size: 15px; font-weight: 500; }
+input[type="text"], input[type="password"] {
+  width: 100%; height: 48px; padding: 0 14px; margin-bottom: 22px; background: #181818; color: #f2f2f2;
+  border: 1px solid #3a3a3a; border-radius: 6px; font: inherit; font-size: 15px; outline: none;
+}
+input:focus { border-color: #7a5cff; box-shadow: 0 0 0 2px rgba(122, 92, 255, .35); }
+.btn {
+  display: block; width: 100%; height: 44px; margin: 0; padding: 0 18px; border-radius: 6px; font: inherit; font-size: 15px;
+  font-weight: 500; cursor: pointer; border: 1px solid transparent;
+}
+.btn:disabled { opacity: .6; cursor: default; }
+.primary { background: #f0752e; color: #fff; }
+.primary:hover:not(:disabled) { background: #f58a4c; }
+.secondary { background: #1f1f1f; color: #f2f2f2; border-color: #3a3a3a; }
+.secondary:hover:not(:disabled) { background: #2a2a2a; }
+.or { display: flex; align-items: center; gap: 14px; margin: 24px 0; color: #cfcfcf; font-size: 15px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: #353535; }
+.err {
+  margin: -6px 0 18px; padding: 10px 12px; border: 1px solid #7a2a2a; background: #2b1818; color: #ff9b9b;
+  border-radius: 6px; font-size: 13px;
+}
+.backdrop {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0, 0, 0, .65);
+}
+.backdrop[hidden], [hidden] { display: none !important; }
+.dialog {
+  width: 100%; max-width: 420px; max-height: 100vh; overflow: auto; background: #222; border: 1px solid #353535;
+  border-radius: 8px; padding: 28px;
+}
+.dialog h2 { margin: 0 0 8px; font-size: 20px; font-weight: 500; text-align: center; }
+.desc { margin: 0 0 18px; color: #b8b8b8; text-align: center; font-size: 13px; }
+.qr { text-align: center; margin-bottom: 18px; }
+.qr img { background: #fff; padding: 8px; border-radius: 6px; }
+.manual { margin-top: 8px; font-size: 12px; color: #b8b8b8; word-break: break-all; }
+.manual code { color: #f2f2f2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+#m-code { text-align: center; letter-spacing: .4em; font-size: 20px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+#m-form .btn + .btn { margin-top: 10px; }
