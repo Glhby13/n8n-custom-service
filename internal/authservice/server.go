@@ -187,7 +187,7 @@ func (s *Server) establishSession(ctx context.Context, claims *UserClaims) (*log
 	// 2. Enforce Role: n8n-access
 	if !claims.HasRole("n8n-access") {
 		s.log.Warn("user lacks required role n8n-access", "user", claims.Email, "roles", claims.Roles)
-		return nil, &loginFailure{http.StatusForbidden, "Akses ditolak: Akun " + claims.Email + " tidak memiliki role 'n8n-access' di Keycloak."}
+		return nil, &loginFailure{http.StatusForbidden, msgNotAuthorized}
 	}
 
 	s.log.Info("oidc authentication successful", "email", claims.Email, "roles", claims.Roles)

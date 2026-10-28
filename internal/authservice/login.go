@@ -23,6 +23,9 @@ import (
 //go:embed web/login.html web/login.js web/login.css web/logo.svg
 var webFS embed.FS
 
+// msgNotAuthorized is shown whenever the account may not use n8n (no access role); it names no role and no system.
+const msgNotAuthorized = "Your account is not authorized to access this application. Please contact your administrator for assistance."
+
 const (
 	adminRole        = "n8n-admin"
 	maxUserFailures  = 5
@@ -193,7 +196,7 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "Username, password, atau kode authenticator tidak valid.")
 		return
 	case errors.Is(err, ErrAccessDenied):
-		writeErr(w, http.StatusForbidden, "access_denied", "Akun Anda tidak punya akses ke n8n.")
+		writeErr(w, http.StatusForbidden, "access_denied", msgNotAuthorized)
 		return
 	case err != nil:
 		s.log.Error("ad sign-in backend", "err", err)
@@ -203,7 +206,7 @@ func (s *Server) handleLoginAD(w http.ResponseWriter, r *http.Request) {
 
 	if !claims.HasRole("n8n-access") {
 		s.log.Warn("user lacks required role n8n-access", "user", claims.Email)
-		writeErr(w, http.StatusForbidden, "access_denied", "Akun "+claims.Email+" tidak memiliki role 'n8n-access' di Keycloak.")
+		writeErr(w, http.StatusForbidden, "access_denied", msgNotAuthorized)
 		return
 	}
 

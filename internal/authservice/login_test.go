@@ -26,11 +26,13 @@ type kcUser struct {
 }
 
 // fakeKeycloak reproduces what the real realm does for client n8n-lab: the n8n-direct-grant flow asks for the code only
-// when the user holds an OTP credential AND the n8n-admin role; the Admin API lists and registers credentials.
+// when the user holds an OTP credential AND the n8n-admin role, and (denyNoAccess, as in the real flow) refuses a user
+// who proved the password but lacks n8n-access with 401 and an HTML page; the Admin API lists and registers credentials.
 type fakeKeycloak struct {
-	mu    sync.Mutex
-	users map[string]*kcUser // by id
-	srv   *httptest.Server
+	mu           sync.Mutex
+	denyNoAccess bool
+	users        map[string]*kcUser // by id
+	srv          *httptest.Server
 }
 
 func jwt(claims map[string]any) string {
@@ -77,6 +79,11 @@ func (k *fakeKeycloak) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if u == nil || u.password != r.Form.Get("password") {
 		bad()
+		return
+	}
+	if k.denyNoAccess && !hasRole(u.roles, "n8n-access") {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Access denied</body></html>"))
 		return
 	}
 	if u.otpRaw != "" && hasRole(u.roles, "n8n-admin") && !validTOTP(u.otpRaw, r.Form.Get("totp"), time.Now()) {
@@ -288,13 +295,31 @@ func TestADLoginWrongPasswordIsGeneric(t *testing.T) {
 	}
 }
 
+// Second lock: even when Keycloak lets the user through, the application still refuses a token without n8n-access.
 func TestADLoginRequiresN8nAccessRole(t *testing.T) {
 	u := regular()
 	u.roles = []string{"n8n-user"}
 	e := newEnv(t, u)
 	rr, body := e.post(t, "/sso/login/ad", map[string]string{"username": "budi", "password": "Pw-budi"})
-	if rr.Code != 403 || body["error"] != "access_denied" || cookieOf(rr) != "" {
+	if rr.Code != 403 || body["error"] != "access_denied" || body["error_description"] != msgNotAuthorized || cookieOf(rr) != "" {
 		t.Fatalf("got %d %v", rr.Code, body)
+	}
+}
+
+// First lock: Keycloak's flow refuses the user (401 + HTML after the password check); the page shows the neutral
+// message, a wrong password is still a normal credential error, and neither case sets a session.
+func TestADLoginKeycloakDeniesWithoutAccessRole(t *testing.T) {
+	u := regular()
+	u.roles = []string{"n8n-user"}
+	e := newEnv(t, u)
+	e.kc.denyNoAccess = true
+	rr, body := e.post(t, "/sso/login/ad", map[string]string{"username": "budi", "password": "Pw-budi"})
+	if rr.Code != 403 || body["error"] != "access_denied" || body["error_description"] != msgNotAuthorized || cookieOf(rr) != "" {
+		t.Fatalf("denied: got %d %v", rr.Code, body)
+	}
+	rr, body = e.post(t, "/sso/login/ad", map[string]string{"username": "budi", "password": "nope"})
+	if rr.Code != 401 || body["error"] != "invalid_credentials" {
+		t.Fatalf("wrong password: got %d %v", rr.Code, body)
 	}
 }
 

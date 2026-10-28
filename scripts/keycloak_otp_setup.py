@@ -73,11 +73,15 @@ def check_flow(tok, base, client, problems):
     rows = call("GET", f"{base}/authentication/flows/{urllib.parse.quote(alias)}/executions", tok)
     print(f"flow {alias}:")
     seen = {}
+    in_deny = False  # the optional "<flow>-deny-no-access" sub-flow (keycloak_require_access_role.py) is not part of the OTP steps
     for e in rows:
+        if e["level"] == 0:
+            in_deny = (e.get("displayName") or "").endswith("-deny-no-access")
         cfg = ""
         if e.get("authenticationConfig"):
             cfg = (call("GET", f"{base}/authentication/config/{e['authenticationConfig']}", tok).get("config") or {}).get("condUserRole", "")
-        seen[e.get("providerId") or e.get("displayName")] = (e["requirement"], cfg, e["level"])
+        if not in_deny:
+            seen[e.get("providerId") or e.get("displayName")] = (e["requirement"], cfg, e["level"])
         print("  " + "  " * e["level"] + f"{e.get('displayName') or e.get('providerId')}  [{e['requirement']}]" + (f"  role={cfg}" if cfg else ""))
 
     def need(provider, req, level, label):
@@ -93,7 +97,8 @@ def check_flow(tok, base, client, problems):
         problems.append(f"flow {alias}: the role condition is '{role[1]}', expected '{CLIENT}.{ADMIN_ROLE}'")
     need("conditional-user-configured", "REQUIRED", 1, "Condition - user configured")
     need("direct-grant-validate-otp", "REQUIRED", 1, "OTP")
-    if not any(v[0] == "CONDITIONAL" and v[2] == 0 for v in seen.values()):
+    if not any(v[0] == "CONDITIONAL" and v[2] == 0 for v in seen.values()) and not any(
+            e["requirement"] == "CONDITIONAL" and e["level"] == 0 and not (e.get("displayName") or "").endswith("-deny-no-access") for e in rows):
         problems.append(f"flow {alias}: the OTP steps must sit in a CONDITIONAL sub-flow")
 
 

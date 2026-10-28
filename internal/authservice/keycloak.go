@@ -52,6 +52,10 @@ func (c *OIDCClient) DirectGrant(ctx context.Context, username, password, totp s
 			return nil, ErrBadCredentials
 		case status == http.StatusForbidden || e.Error == "access_denied" || e.Error == "unauthorized_client":
 			return nil, ErrAccessDenied
+		case status == http.StatusUnauthorized && e.Error == "":
+			// The flow's "Deny access" step (user without the client's access role) is answered with 401 and Keycloak's
+			// HTML error page, not with a JSON error. A real client or secret problem still comes as JSON.
+			return nil, ErrAccessDenied
 		}
 		return nil, fmt.Errorf("direct grant failed (%d): %s", status, e.Error)
 	}
