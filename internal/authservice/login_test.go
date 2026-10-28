@@ -444,6 +444,10 @@ func TestLoginPageAndAssets(t *testing.T) {
 			t.Fatalf("page lacks %q", want)
 		}
 	}
+	// n8n serves its own favicon at /favicon.ico (same origin, so the page CSP already allows it): no copy to keep in step
+	if !strings.Contains(body, `rel="icon" href="/favicon.ico"`) {
+		t.Fatal("the page must use n8n's own favicon")
+	}
 	if strings.Contains(strings.ToLower(body), "forgot") {
 		t.Fatal("the page must not offer password recovery")
 	}
