@@ -13,7 +13,7 @@ The script READS the flow (it never creates or edits it) and GRANTS the missing 
 With --check it changes nothing and exits 1 when something is missing.
 
 Env: KC_URL (default https://auth.lab.local)  KC_REALM (lab)  KC_CLIENT (n8n-lab)  KC_ADMIN_ROLE (n8n-admin)
-     KC_ADMIN_USER (admin)  KC_ADMIN_PASSWORD (else lab/SECRETS.md when present, else asked on the terminal)
+     KC_ADMIN_USER (admin)  KC_ADMIN_PASSWORD (else lab/SECRETS.md, only when KC_URL is *.lab.local, else asked on the terminal)
      KC_INSECURE=1 only for a self-signed lab certificate.
 Usage: python3 -I keycloak_otp_setup.py [--check]
 """
@@ -31,7 +31,7 @@ def admin_password():
     if os.environ.get("KC_ADMIN_PASSWORD"):
         return os.environ["KC_ADMIN_PASSWORD"]
     secrets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "SECRETS.md")  # lab layout only
-    if os.path.exists(secrets):
+    if KC.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0].endswith(".lab.local") and os.path.exists(secrets):  # never send the lab password to another host
         for line in open(secrets, encoding="utf8"):
             if "Admin console" in line and "realm `master`" in line:
                 cells = re.findall(r"`([^`]+)`", line)
