@@ -608,6 +608,8 @@ service account, restart pod `auth-service` (token service account disimpan di m
 
 **Bahasa**: semua teks yang tampil ke pengguna (halaman login, pesan error JSON halaman login, halaman peralihan, halaman error) berbahasa Inggris; log tetap bebas.
 
+**Nama user (placeholder)**: akun yang dibuat sebelum pemiliknya pernah login (mis. target `transfer-ownership` yang belum pernah masuk) diberi nama placeholder `<bagian-lokal-email>` / `(AD)` (mis. `agi.iskandar` / `(AD)`, nama depan dipotong 32 karakter sesuai kolom n8n). Saat user itu login AD, jika nama di n8n masih placeholder dan Keycloak mengirim `given_name`/`family_name`, nama user dan nama personal project (`<nama depan> <nama belakang> <email>`) diisi dari Keycloak (disalin apa adanya). Nama yang berbeda dari placeholder (sudah terisi dari Keycloak, atau diganti manual oleh user) tidak pernah ditimpa; project yang sudah diganti namanya juga tidak disentuh. Placeholder lama `User` / `Lab` tetap dikenali sebagai placeholder sehingga akun lama terkoreksi saat login berikutnya. Bila Keycloak tidak mengirim nama, placeholder dibiarkan. Kode: `internal/authservice/names.go`, `EnsureUserExists` di `db.go`; tes `names_test.go`.
+
 **Tampilan**: kartu di tengah jendela dengan logo n8n di dalam kartu (seperti halaman login DrawSpace), tema gelap, favicon
 memakai `/favicon.ico` milik n8n sendiri (dilayani n8n, tidak ada salinan aset).
 
@@ -908,6 +910,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 
 | Tanggal | Commit / tag | Perubahan |
 |---|---|---|
+| 2026-10-29 | (auth-service, nama user) | Akun yang dibuat tanpa login (target transfer) kini memakai placeholder `<lokal-email>` / `(AD)` (bukan lagi "User Lab"); saat login pertama nama user dan personal project diisi dari Keycloak bila masih placeholder (`User`/`Lab` lama juga dikenali), nama manual tidak ditimpa. Pembetulan massal akun lama yang sudah "User Lab" cukup lewat SQL satu kali (tanpa endpoint baru). Tes `TestIsPlaceholderName`, `TestInitialNames`, `TestNamesToFill`. |
 | 2026-10-20 | `2f8d23a` | Rilis awal: poller publish, sinkron ke GitLab, API versions/rollback, Jenkins/Docker/Helm. Deploy dev. |
 | 2026-10-20 | `ad0cf86` | Nama workflow diambil dari objek workflow (endpoint versi n8n mengembalikan label "Version …"). |
 | 2026-10-20 | `edddcf7` | Teks multi-baris disimpan per baris (`__lines__`) agar diff GitLab per baris. |

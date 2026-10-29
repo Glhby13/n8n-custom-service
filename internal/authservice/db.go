@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -260,25 +262,25 @@ func (d *DB) ExecuteTakeover(ctx context.Context, oidcEmail, localEmail, firstNa
 }
 
 // EnsureUserExists ensures an n8n user and their personal project exist in n8n_db.
+//
+// firstName/lastName come from the identity provider (empty when the account is created without a sign-in, e.g. as the
+// target of an ownership transfer). A new account without names gets the placeholder from placeholderNames. An existing
+// account whose names are still a placeholder is filled in with the identity provider's names the first time they are
+// known; names that differ from a placeholder (the user changed them, or they were filled in before) are never touched.
 func (d *DB) EnsureUserExists(ctx context.Context, email, firstName, lastName string) error {
 	email = strings.TrimSpace(strings.ToLower(email))
-	var count int
-	err := d.pool.QueryRow(ctx, `SELECT COUNT(*) FROM "user" WHERE LOWER(email) = LOWER($1);`, email).Scan(&count)
-	if err != nil {
+	var userID, curFirst, curLast string
+	err := d.pool.QueryRow(ctx, `SELECT id, COALESCE("firstName", ''), COALESCE("lastName", '') FROM "user" WHERE LOWER(email) = LOWER($1);`, email).Scan(&userID, &curFirst, &curLast)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("check user existence: %w", err)
 	}
-	if count > 0 {
-		return nil
+	if err == nil {
+		return d.fillPlaceholderNames(ctx, userID, email, curFirst, curLast, firstName, lastName)
 	}
 
 	d.log.Info("JIT provisioning new user in n8n_db", "email", email)
 
-	if firstName == "" {
-		firstName = "User"
-	}
-	if lastName == "" {
-		lastName = "Lab"
-	}
+	firstName, lastName = initialNames(email, firstName, lastName)
 
 	// Generate a random initial password (will be overwritten by managed password)
 	dummyPass := make([]byte, 16)
@@ -295,7 +297,6 @@ func (d *DB) EnsureUserExists(ctx context.Context, email, firstName, lastName st
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// 1. Insert user
-	var userID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO "user" (email, "firstName", "lastName", password, "roleSlug", disabled, "mfaEnabled", "createdAt", "updatedAt")
 		VALUES ($1, $2, $3, $4, 'global:member', false, false, NOW(), NOW())
@@ -306,7 +307,7 @@ func (d *DB) EnsureUserExists(ctx context.Context, email, firstName, lastName st
 	}
 
 	// 2. Insert personal project (n8n project table id is varchar(36))
-	projName := fmt.Sprintf("%s %s <%s>", firstName, lastName, email)
+	projName := projectName(firstName, lastName, email)
 	var projID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO project (id, name, type, "creatorId", "createdAt", "updatedAt")
@@ -327,6 +328,37 @@ func (d *DB) EnsureUserExists(ctx context.Context, email, firstName, lastName st
 	}
 
 	return tx.Commit(ctx)
+}
+
+// fillPlaceholderNames replaces a placeholder name of an existing user (and the name of their personal project, when it
+// still carries that placeholder) with the names the identity provider sent.
+func (d *DB) fillPlaceholderNames(ctx context.Context, userID, email, curFirst, curLast, idpFirst, idpLast string) error {
+	newFirst, newLast, ok := namesToFill(email, curFirst, curLast, idpFirst, idpLast)
+	if !ok {
+		return nil
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin fill names tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `UPDATE "user" SET "firstName" = $1, "lastName" = $2, "updatedAt" = NOW() WHERE id = $3;`, newFirst, newLast, userID); err != nil {
+		return fmt.Errorf("update user names: %w", err)
+	}
+	// Only a project still named after the placeholder is renamed; a project the user renamed is left alone.
+	if _, err := tx.Exec(ctx, `
+		UPDATE project SET name = $1, "updatedAt" = NOW()
+		WHERE type = 'personal' AND name = $2
+		  AND id IN (SELECT "projectId" FROM project_relation WHERE "userId" = $3 AND role = 'project:personalOwner');
+	`, projectName(newFirst, newLast, email), projectName(curFirst, curLast, email), userID); err != nil {
+		return fmt.Errorf("update personal project name: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	d.log.Info("replaced placeholder name with identity provider name", "email", email)
+	return nil
 }
 
 // EnsureManagedPassword sets the user's password to a known plain text password.
