@@ -760,6 +760,7 @@ Berlaku untuk lingkungan baru (mis. kantor). Tanpa DDL, tanpa tabel baru, DB n8n
      `scripts/keycloak_browser_flow.py` (`--check` baca saja, tanpa argumen menerapkan, `--undo` membatalkan). Flow `n8n-browser`:
      tanpa role `n8n-access` ditolak Keycloak, role `n8n-admin` wajib OTP walau sesi SSO sudah ada, selain itu langsung masuk.
      Override Direct Grant (halaman `/signin`) tidak disentuh. Env: `KC_URL`, `KC_REALM`, `KC_CLIENT`, `KC_ACCESS_ROLE`, `KC_ADMIN_ROLE`, `KC_ADMIN_USER`, `KC_ADMIN_PASSWORD`.
+     Password admin: dari `KC_ADMIN_PASSWORD`, atau (hanya bila `KC_URL` = `*.lab.local`) dari `lab/SECRETS.md`, atau diketik di prompt. Untuk Keycloak kantor selalu isi sendiri (`read -s`); skrip `keycloak_otp_setup.py` dan `keycloak_require_access_role.py` memakai aturan yang sama.
 2. **Secret** `n8n-auth-service-secret`: `DB_PASSWORD`, `OIDC_CLIENT_SECRET`, `ADMIN_API_TOKEN`.
 3. **Values `auth-service`**: env [§8.1](#81-auth-service), terutama `OTP_ISSUER` = nama tampilan realm.
 4. **Deploy, urutan penting**: push kode, tunggu Jenkins hijau dan rollout `auth-service` dan `sharing-service` selesai (`kubectl rollout status`), **baru** tambahkan path `/signin` (Exact) ke Ingress `auth-service` untuk host n8n. Sebelum ingress ditambah, `/signin` tetap dilayani n8n (aman).
@@ -914,6 +915,7 @@ Dockerfile, Jenkinsfile, .golangci.yml
 
 | Tanggal | Commit / tag | Perubahan |
 |---|---|---|
+| 2026-10-29 | (skrip Keycloak) | Tiga skrip `scripts/keycloak_*.py` membaca `lab/SECRETS.md` hanya bila `KC_URL` = `*.lab.local` (sebelumnya password lab ikut terkirim ke Keycloak kantor bila dijalankan dari `lab/`). |
 | 2026-10-29 | (auth-service, nama user) | Akun yang dibuat tanpa login (target transfer) kini memakai placeholder `<lokal-email>` / `(AD)` (bukan lagi "User Lab"); saat login pertama nama user dan personal project diisi dari Keycloak bila masih placeholder (`User`/`Lab` lama juga dikenali), nama manual tidak ditimpa. Pembetulan massal akun lama yang sudah "User Lab" cukup lewat SQL satu kali (tanpa endpoint baru). Tes `TestIsPlaceholderName`, `TestInitialNames`, `TestNamesToFill`. |
 | 2026-10-20 | `2f8d23a` | Rilis awal: poller publish, sinkron ke GitLab, API versions/rollback, Jenkins/Docker/Helm. Deploy dev. |
 | 2026-10-20 | `ad0cf86` | Nama workflow diambil dari objek workflow (endpoint versi n8n mengembalikan label "Version …"). |
