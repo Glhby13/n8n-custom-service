@@ -756,6 +756,10 @@ Berlaku untuk lingkungan baru (mis. kantor). Tanpa DDL, tanpa tabel baru, DB n8n
    - client role `n8n-access`, `n8n-admin`, `n8n-user`; grup `n8n` (role `n8n-access`), `n8n/n8n-admin`, `n8n/n8n-user`;
    - flow Direct Grant khusus client (Advanced → Authentication flow overrides → Direct grant flow): `Username Validation` (REQUIRED) → `Password` (REQUIRED) → sub-flow **CONDITIONAL** berisi `Condition - user role` (role `<client>.n8n-admin`), `Condition - user configured`, `OTP` (semuanya REQUIRED);
    - jalankan `python3 -I scripts/keycloak_otp_setup.py --check`: memeriksa client dan struktur flow (hanya membaca) dan izin service account. Tanpa `--check`, skrip memberi izin yang kurang (`view-users`, `query-users`, `manage-users`, `view-clients`, `query-clients`; idempoten). Env: `KC_URL`, `KC_REALM`, `KC_CLIENT`, `KC_ADMIN_ROLE`, `KC_ADMIN_PASSWORD` (kalau kosong ditanya di terminal), `KC_INSECURE=1` hanya untuk sertifikat self-signed.
+   - **SSO lewat portal / kode otorisasi** (kartu n8n di Portal Platform membuka `/sso/login`): flow *browser* client memakai
+     `scripts/keycloak_browser_flow.py` (`--check` baca saja, tanpa argumen menerapkan, `--undo` membatalkan). Flow `n8n-browser`:
+     tanpa role `n8n-access` ditolak Keycloak, role `n8n-admin` wajib OTP walau sesi SSO sudah ada, selain itu langsung masuk.
+     Override Direct Grant (halaman `/signin`) tidak disentuh. Env: `KC_URL`, `KC_REALM`, `KC_CLIENT`, `KC_ACCESS_ROLE`, `KC_ADMIN_ROLE`, `KC_ADMIN_USER`, `KC_ADMIN_PASSWORD`.
 2. **Secret** `n8n-auth-service-secret`: `DB_PASSWORD`, `OIDC_CLIENT_SECRET`, `ADMIN_API_TOKEN`.
 3. **Values `auth-service`**: env [§8.1](#81-auth-service), terutama `OTP_ISSUER` = nama tampilan realm.
 4. **Deploy, urutan penting**: push kode, tunggu Jenkins hijau dan rollout `auth-service` dan `sharing-service` selesai (`kubectl rollout status`), **baru** tambahkan path `/signin` (Exact) ke Ingress `auth-service` untuk host n8n. Sebelum ingress ditambah, `/signin` tetap dilayani n8n (aman).
