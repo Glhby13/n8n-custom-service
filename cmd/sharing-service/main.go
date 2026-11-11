@@ -125,6 +125,11 @@ func run() error {
 	mux.Handle("PUT /rest/workflows/{workflowId}/share/", sp)
 	mux.Handle("PUT /rest/credentials/{credentialId}/share", sp)
 	mux.Handle("PUT /rest/credentials/{credentialId}/share/", sp)
+	mux.Handle("GET /rest/credentials/{credentialId}", sp)
+	mux.Handle("GET /rest/credentials/{credentialId}/", sp)
+	mux.Handle("GET /rest/credentials", sp)
+	mux.Handle("GET /rest/credentials/", sp)
+	mux.Handle("/rest/credentials/", sp)
 	mux.Handle("GET /assets/", sp)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

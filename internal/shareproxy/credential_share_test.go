@@ -449,4 +449,83 @@ func TestHandlerHTTPValidation(t *testing.T) {
 			t.Fatalf("expected status 401 Unauthorized, got %d", rec.Code)
 		}
 	})
+
+	t.Run("unauthenticated GET credential returns 401", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/rest/credentials/cred-abc", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401 Unauthorized, got %d", rec.Code)
+		}
+	})
+}
+
+// TestSpecialCredentialSubpaths verifies special subpath discrimination.
+func TestSpecialCredentialSubpaths(t *testing.T) {
+	specials := []string{"for-workflow", "test", "schema"}
+	for _, s := range specials {
+		if !isSpecialCredentialSubpath(s) {
+			t.Errorf("expected %q to be recognized as special credential subpath", s)
+		}
+	}
+
+	regularIDs := []string{"iMjvivyfWB5flRsO", "1JleLoeJBCcjTiP2", "cred-123", "a12aca7b"}
+	for _, id := range regularIDs {
+		if isSpecialCredentialSubpath(id) {
+			t.Errorf("expected %q NOT to be special credential subpath", id)
+		}
+	}
+}
+
+// TestTransparentProxyRouting verifies transparent proxy path forwarding.
+func TestTransparentProxyRouting(t *testing.T) {
+	mockN8N := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proxied-By-Mock", "true")
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/rest/credentials/for-workflow" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"c1","name":"Cred 1"}]}`))
+			return
+		}
+		if r.URL.Path == "/rest/credentials/test" && r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"data":{"status":"ok"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer mockN8N.Close()
+
+	h := &Handler{
+		n8nBaseURL: mockN8N.URL,
+		client:     mockN8N.Client(),
+	}
+
+	t.Run("proxy for-workflow endpoint", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/rest/credentials/for-workflow?workflowId=123", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rec.Code)
+		}
+		if rec.Header().Get("X-Proxied-By-Mock") != "true" {
+			t.Fatalf("expected proxy header from mock n8n")
+		}
+		if !strings.Contains(rec.Body.String(), `"id":"c1"`) {
+			t.Fatalf("unexpected body: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("proxy post test endpoint", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/rest/credentials/test", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+			t.Fatalf("unexpected body: %s", rec.Body.String())
+		}
+	})
 }

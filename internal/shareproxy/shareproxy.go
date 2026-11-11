@@ -84,7 +84,16 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
-// ServeHTTP handles PUT /rest/workflows/{workflowId}/share, PUT /rest/credentials/{credentialId}/share, and GET /rest/settings.
+// ProjectRef represents a reference to a project in credential metadata.
+type ProjectRef struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	Type string  `json:"type"`
+	Icon *string `json:"icon"`
+}
+
+// ServeHTTP handles PUT /rest/workflows/{workflowId}/share, PUT /rest/credentials/{credentialId}/share,
+// GET /rest/credentials/{credentialId}, GET /rest/credentials, and GET /rest/settings.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.log == nil {
 		h.log = slog.Default()
@@ -103,28 +112,60 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method != http.MethodPut {
-		http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	if r.PathValue("credentialId") != "" || isCredentialSharePath(r.URL.Path) {
-		credID := extractCredentialPathID(r)
-		if credID == "" {
-			http.Error(w, `{"status":"error","message":"missing credentialId"}`, http.StatusBadRequest)
+	if r.PathValue("workflowId") != "" || isWorkflowSharePath(r.URL.Path) {
+		if r.Method != http.MethodPut {
+			http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
 			return
 		}
-		h.handleCredentialShare(w, r, credID)
-		return
-	}
-
-	if r.PathValue("workflowId") != "" || isWorkflowSharePath(r.URL.Path) {
 		wfID := extractWorkflowPathID(r)
 		if wfID == "" {
 			http.Error(w, `{"status":"error","message":"missing workflowId"}`, http.StatusBadRequest)
 			return
 		}
 		h.handleWorkflowShare(w, r, wfID)
+		return
+	}
+
+	if isCredentialRelatedPath(r.URL.Path) {
+		if isCredentialSharePath(r.URL.Path) {
+			if r.Method != http.MethodPut {
+				http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
+				return
+			}
+			credID := extractCredentialPathID(r)
+			if credID == "" {
+				http.Error(w, `{"status":"error","message":"missing credentialId"}`, http.StatusBadRequest)
+				return
+			}
+			h.handleCredentialShare(w, r, credID)
+			return
+		}
+
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) == 2 {
+			if r.Method == http.MethodGet {
+				h.handleGetCredentials(w, r)
+				return
+			}
+			h.handleTransparentProxy(w, r)
+			return
+		}
+
+		if len(parts) >= 3 {
+			sub := parts[2]
+			if isSpecialCredentialSubpath(sub) {
+				h.handleTransparentProxy(w, r)
+				return
+			}
+			if r.Method == http.MethodGet {
+				h.handleGetCredential(w, r, sub)
+				return
+			}
+			h.handleTransparentProxy(w, r)
+			return
+		}
+
+		h.handleTransparentProxy(w, r)
 		return
 	}
 
@@ -501,6 +542,20 @@ func extractCredentialIDs(data []byte) []string {
 	return credIDs
 }
 
+func isCredentialRelatedPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) >= 2 && parts[0] == "rest" && parts[1] == "credentials"
+}
+
+func isSpecialCredentialSubpath(segment string) bool {
+	switch segment {
+	case "for-workflow", "test", "schema":
+		return true
+	default:
+		return false
+	}
+}
+
 func isCredentialSharePath(path string) bool {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	return len(parts) >= 3 && parts[0] == "rest" && parts[1] == "credentials" && parts[len(parts)-1] == "share"
@@ -516,7 +571,7 @@ func extractCredentialPathID(r *http.Request) string {
 		return id
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) >= 3 && parts[0] == "rest" && parts[1] == "credentials" && parts[len(parts)-1] == "share" {
+	if len(parts) >= 3 && parts[0] == "rest" && parts[1] == "credentials" {
 		return parts[2]
 	}
 	return ""
@@ -771,4 +826,445 @@ func patchSigninView(body []byte) ([]byte, bool) {
 	out = append(out, signinRedirect...)
 	out = append(out, body[loc[1]:]...)
 	return out, true
+}
+
+// handleTransparentProxy reverse proxies requests under /rest/credentials directly to n8n backend.
+func (h *Handler) handleTransparentProxy(w http.ResponseWriter, r *http.Request) {
+	targetURL := h.n8nBaseURL + r.URL.RequestURI()
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		h.log.Error("create transparent proxy request failed", "err", err, "path", r.URL.Path)
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	for k, vv := range r.Header {
+		if strings.EqualFold(k, "Accept-Encoding") {
+			continue
+		}
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		h.log.Error("transparent proxy request to n8n failed", "err", err, "path", r.URL.Path)
+		http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// handleGetCredential intercepts GET /rest/credentials/{id} to enrich responses for owners
+// and safely return metadata (without secrets) for shared users, resolving red popup errors.
+func (h *Handler) handleGetCredential(w http.ResponseWriter, r *http.Request, credentialID string) {
+	credentialID = strings.TrimSpace(credentialID)
+	if credentialID == "" {
+		http.Error(w, `{"status":"error","message":"missing credentialId"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.authenticate(r)
+	if err != nil {
+		h.log.Warn("get credential unauthenticated", "credentialId", credentialID, "err", err)
+		http.Error(w, `{"status":"error","message":"Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	if h.pool == nil {
+		h.log.Error("database pool not initialized")
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	type shareRow struct {
+		Role        string
+		ProjectID   string
+		ProjectName string
+		ProjectType string
+		Icon        *string
+	}
+	const sharesQuery = `
+		SELECT sc.role, p.id, p.name, p.type, p.icon
+		FROM shared_credentials sc
+		JOIN project p ON sc."projectId" = p.id
+		WHERE sc."credentialsId" = $1;
+	`
+	rows, err := h.pool.Query(ctx, sharesQuery, credentialID)
+	if err != nil {
+		h.log.Error("query credential shares failed", "credentialId", credentialID, "err", err)
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var shares []shareRow
+	for rows.Next() {
+		var s shareRow
+		if err := rows.Scan(&s.Role, &s.ProjectID, &s.ProjectName, &s.ProjectType, &s.Icon); err == nil {
+			shares = append(shares, s)
+		}
+	}
+	rows.Close()
+
+	const userProjectsQuery = `
+		SELECT pr."projectId"
+		FROM project_relation pr
+		WHERE pr."userId" = $1;
+	`
+	pRows, err := h.pool.Query(ctx, userProjectsQuery, user.ID)
+	if err != nil {
+		h.log.Error("query user projects failed", "userId", user.ID, "err", err)
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+	defer pRows.Close()
+
+	userPIDs := make(map[string]bool)
+	for pRows.Next() {
+		var pid string
+		if err := pRows.Scan(&pid); err == nil {
+			userPIDs[pid] = true
+		}
+	}
+	pRows.Close()
+
+	var isOwner, isSharee bool
+	var homeProject *ProjectRef
+	sharedWithProjects := make([]ProjectRef, 0)
+
+	for _, s := range shares {
+		pref := ProjectRef{
+			ID:   s.ProjectID,
+			Name: s.ProjectName,
+			Type: s.ProjectType,
+			Icon: s.Icon,
+		}
+		switch s.Role {
+		case "credential:owner":
+			homeProject = &pref
+			if userPIDs[s.ProjectID] {
+				isOwner = true
+			}
+		case "credential:user":
+			sharedWithProjects = append(sharedWithProjects, pref)
+			if userPIDs[s.ProjectID] {
+				isSharee = true
+			}
+		}
+	}
+
+	if !isOwner && !isSharee {
+		h.log.Warn("user lacks permission to view credential", "credentialId", credentialID, "userId", user.ID)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		errResp, _ := json.Marshal(map[string]string{
+			"message": fmt.Sprintf("Credential with ID %q could not be found.", credentialID),
+		})
+		_, _ = w.Write(errResp)
+		return
+	}
+
+	if isOwner {
+		targetURL := h.n8nBaseURL + r.URL.RequestURI()
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+		if err != nil {
+			http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		for k, vv := range r.Header {
+			if strings.EqualFold(k, "Accept-Encoding") {
+				continue
+			}
+			for _, v := range vv {
+				req.Header.Add(k, v)
+			}
+		}
+		resp, err := h.client.Do(req)
+		if err != nil {
+			h.log.Error("fetch credential from n8n failed", "credentialId", credentialID, "err", err)
+			http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			for k, vv := range resp.Header {
+				if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+					continue
+				}
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(bodyBytes, &payload); err == nil {
+			if data, ok := payload["data"].(map[string]any); ok {
+				data["homeProject"] = homeProject
+				data["sharedWithProjects"] = sharedWithProjects
+				if scopes, ok := data["scopes"].([]any); ok {
+					hasShare := false
+					for _, sc := range scopes {
+						if sc == "credential:share" {
+							hasShare = true
+							break
+						}
+					}
+					if !hasShare {
+						data["scopes"] = append(scopes, "credential:share")
+					}
+				}
+				enriched, err := json.Marshal(payload)
+				if err == nil {
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(enriched)
+					return
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+		return
+	}
+
+	// Sharee access (credential:user): NEVER query or return encrypted secrets ("data" column)
+	const fetchEntitySQL = `
+		SELECT name, type, "createdAt", "updatedAt", COALESCE("isManaged", false), COALESCE("isGlobal", false)
+		FROM credentials_entity
+		WHERE id = $1;
+	`
+	var name, credType string
+	var createdAt, updatedAt time.Time
+	var isManaged, isGlobal bool
+	err = h.pool.QueryRow(ctx, fetchEntitySQL, credentialID).Scan(&name, &credType, &createdAt, &updatedAt, &isManaged, &isGlobal)
+	if err != nil {
+		h.log.Warn("credential not found in entity table", "credentialId", credentialID, "err", err)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		errResp, _ := json.Marshal(map[string]string{
+			"message": fmt.Sprintf("Credential with ID %q could not be found.", credentialID),
+		})
+		_, _ = w.Write(errResp)
+		return
+	}
+
+	shareeResp := map[string]any{
+		"data": map[string]any{
+			"id":                 credentialID,
+			"name":               name,
+			"type":               credType,
+			"createdAt":          createdAt.Format(time.RFC3339Nano),
+			"updatedAt":          updatedAt.Format(time.RFC3339Nano),
+			"isManaged":          isManaged,
+			"isGlobal":           isGlobal,
+			"homeProject":        homeProject,
+			"sharedWithProjects": sharedWithProjects,
+			"scopes":             []string{"credential:read"},
+		},
+	}
+
+	outBytes, err := json.Marshal(shareeResp)
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(outBytes)
+}
+
+// handleGetCredentials intercepts GET /rest/credentials to include credentials shared with the user
+// and enrich all credentials with homeProject and sharedWithProjects so collaborator badges render.
+func (h *Handler) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
+	targetURL := h.n8nBaseURL + r.URL.RequestURI()
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	for k, vv := range r.Header {
+		if strings.EqualFold(k, "Accept-Encoding") {
+			continue
+		}
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		h.log.Error("fetch credentials list from n8n failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		for k, vv := range resp.Header {
+			if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+				continue
+			}
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+		return
+	}
+
+	user, err := h.authenticate(r)
+	if err == nil && user != nil && h.pool != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		const sharedToUserQuery = `
+			SELECT c.id, c.name, c.type, c."createdAt", c."updatedAt", COALESCE(c."isManaged", false), COALESCE(c."isGlobal", false)
+			FROM credentials_entity c
+			JOIN shared_credentials sc ON c.id = sc."credentialsId"
+			JOIN project_relation pr ON sc."projectId" = pr."projectId"
+			WHERE pr."userId" = $1 AND sc.role = 'credential:user';
+		`
+		sRows, err := h.pool.Query(ctx, sharedToUserQuery, user.ID)
+		if err == nil {
+			existingIDs := make(map[string]bool)
+			for _, item := range payload.Data {
+				if id, ok := item["id"].(string); ok {
+					existingIDs[id] = true
+				}
+			}
+
+			for sRows.Next() {
+				var id, name, credType string
+				var createdAt, updatedAt time.Time
+				var isManaged, isGlobal bool
+				if err := sRows.Scan(&id, &name, &credType, &createdAt, &updatedAt, &isManaged, &isGlobal); err == nil {
+					if !existingIDs[id] {
+						payload.Data = append(payload.Data, map[string]any{
+							"id":        id,
+							"name":      name,
+							"type":      credType,
+							"createdAt": createdAt.Format(time.RFC3339Nano),
+							"updatedAt": updatedAt.Format(time.RFC3339Nano),
+							"isManaged": isManaged,
+							"isGlobal":  isGlobal,
+							"scopes":    []string{"credential:read"},
+						})
+						existingIDs[id] = true
+					}
+				}
+			}
+			sRows.Close()
+		}
+
+		allIDs := make([]string, 0, len(payload.Data))
+		for _, item := range payload.Data {
+			if id, ok := item["id"].(string); ok && id != "" {
+				allIDs = append(allIDs, id)
+			}
+		}
+
+		if len(allIDs) > 0 {
+			const batchSharesQuery = `
+				SELECT sc."credentialsId", sc.role, p.id, p.name, p.type, p.icon
+				FROM shared_credentials sc
+				JOIN project p ON sc."projectId" = p.id
+				WHERE sc."credentialsId" = ANY($1);
+			`
+			bRows, err := h.pool.Query(ctx, batchSharesQuery, allIDs)
+			if err == nil {
+				homeMap := make(map[string]ProjectRef)
+				sharesMap := make(map[string][]ProjectRef)
+				for bRows.Next() {
+					var credID, role, pID, pName, pType string
+					var pIcon *string
+					if err := bRows.Scan(&credID, &role, &pID, &pName, &pType, &pIcon); err == nil {
+						pref := ProjectRef{
+							ID:   pID,
+							Name: pName,
+							Type: pType,
+							Icon: pIcon,
+						}
+						switch role {
+						case "credential:owner":
+							homeMap[credID] = pref
+						case "credential:user":
+							sharesMap[credID] = append(sharesMap[credID], pref)
+						}
+					}
+				}
+				bRows.Close()
+
+				for _, item := range payload.Data {
+					if id, ok := item["id"].(string); ok {
+						if hp, exists := homeMap[id]; exists {
+							item["homeProject"] = hp
+						} else {
+							item["homeProject"] = nil
+						}
+						if spList, exists := sharesMap[id]; exists {
+							item["sharedWithProjects"] = spList
+						} else {
+							item["sharedWithProjects"] = []ProjectRef{}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	enrichedBytes, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(enrichedBytes)
 }
