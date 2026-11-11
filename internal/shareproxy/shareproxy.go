@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,8 +25,8 @@ type Options struct {
 	Log        *slog.Logger
 }
 
-// Handler intercepts PUT /rest/workflows/{workflowId}/share to enable native workflow sharing
-// in n8n Community without license errors.
+// Handler intercepts PUT /rest/workflows/{workflowId}/share and PUT /rest/credentials/{credentialId}/share
+// to enable native workflow and credential sharing in n8n Community without license errors.
 type Handler struct {
 	n8nBaseURL string
 	cookieName string
@@ -83,8 +84,15 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
-// ServeHTTP handles PUT /rest/workflows/{workflowId}/share and GET /rest/settings.
+// ServeHTTP handles PUT /rest/workflows/{workflowId}/share, PUT /rest/credentials/{credentialId}/share, and GET /rest/settings.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.log == nil {
+		h.log = slog.Default()
+	}
+	if h.cookieName == "" {
+		h.cookieName = "n8n-auth"
+	}
+
 	if strings.TrimRight(r.URL.Path, "/") == "/rest/settings" {
 		h.handleSettings(w, r)
 		return
@@ -100,23 +108,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workflowID := r.PathValue("workflowId")
-	if workflowID == "" {
-		// Fallback for paths like /rest/workflows/123/share
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) >= 3 && parts[0] == "rest" && parts[1] == "workflows" && parts[len(parts)-1] == "share" {
-			workflowID = parts[2]
+	if r.PathValue("credentialId") != "" || isCredentialSharePath(r.URL.Path) {
+		credID := extractCredentialPathID(r)
+		if credID == "" {
+			http.Error(w, `{"status":"error","message":"missing credentialId"}`, http.StatusBadRequest)
+			return
 		}
-	}
-	if workflowID == "" {
-		http.Error(w, `{"status":"error","message":"missing workflowId"}`, http.StatusBadRequest)
+		h.handleCredentialShare(w, r, credID)
 		return
 	}
 
+	if r.PathValue("workflowId") != "" || isWorkflowSharePath(r.URL.Path) {
+		wfID := extractWorkflowPathID(r)
+		if wfID == "" {
+			http.Error(w, `{"status":"error","message":"missing workflowId"}`, http.StatusBadRequest)
+			return
+		}
+		h.handleWorkflowShare(w, r, wfID)
+		return
+	}
+
+	http.Error(w, `{"status":"error","message":"not found"}`, http.StatusNotFound)
+}
+
+func (h *Handler) handleWorkflowShare(w http.ResponseWriter, r *http.Request, workflowID string) {
 	// 1. Authenticate calling user against n8n /rest/login
 	user, err := h.authenticate(r)
 	if err != nil {
-		h.log.Warn("share request unauthenticated", "workflowId", workflowID, "err", err)
+		h.log.Warn("workflow share request unauthenticated", "workflowId", workflowID, "err", err)
 		http.Error(w, `{"status":"error","message":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
@@ -170,7 +189,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	`
 	rows, err := tx.Query(ctx, currentQuery, workflowID)
 	if err != nil {
-		h.log.Error("query current shares failed", "err", err)
+		h.log.Error("query current workflow shares failed", "err", err)
 		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -183,50 +202,79 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
-	// New desired editors
-	newEditorsMap := make(map[string]bool)
-	for _, id := range payload.ShareWithIds {
-		id = strings.TrimSpace(id)
-		if id != "" && id != ownerPID {
-			newEditorsMap[id] = true
-		}
-	}
+	toAdd, toDelete := diffShares(currentEditors, payload.ShareWithIds, ownerPID)
 
 	// Delete unshared
-	var toDelete []string
-	for _, cur := range currentEditors {
-		if !newEditorsMap[cur] {
-			toDelete = append(toDelete, cur)
-		}
-	}
 	if len(toDelete) > 0 {
 		const delQuery = `
 			DELETE FROM shared_workflow
 			WHERE "workflowId" = $1 AND role = 'workflow:editor' AND "projectId" = ANY($2);
 		`
 		if _, err := tx.Exec(ctx, delQuery, workflowID, toDelete); err != nil {
-			h.log.Error("delete shares failed", "err", err)
+			h.log.Error("delete workflow shares failed", "err", err)
 			http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
 			return
 		}
 	}
 
 	// Insert new shares
-	for newPID := range newEditorsMap {
+	for _, newPID := range toAdd {
 		const insQuery = `
 			INSERT INTO shared_workflow ("workflowId", "projectId", role, "createdAt", "updatedAt")
 			VALUES ($1, $2, 'workflow:editor', NOW(), NOW())
 			ON CONFLICT ("workflowId", "projectId") DO NOTHING;
 		`
 		if _, err := tx.Exec(ctx, insQuery, workflowID, newPID); err != nil {
-			h.log.Error("insert share failed", "projectId", newPID, "err", err)
+			h.log.Error("insert workflow share failed", "projectId", newPID, "err", err)
 			http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
 			return
 		}
 	}
 
+	// 5. Auto-share credentials referenced by the workflow nodes
+	var nodesBytes []byte
+	const getNodesQuery = `SELECT nodes FROM workflow_entity WHERE id = $1;`
+	if err := tx.QueryRow(ctx, getNodesQuery, workflowID).Scan(&nodesBytes); err != nil {
+		h.log.Warn("fetch workflow nodes failed or workflow not found", "workflowId", workflowID, "err", err)
+	} else {
+		credIDs := extractCredentialIDs(nodesBytes)
+		for _, credID := range credIDs {
+			// Verify if caller has permission to share this credential (owner or user)
+			const checkPermissionQuery = `
+				SELECT 1
+				FROM shared_credentials sc
+				JOIN project_relation pr ON sc."projectId" = pr."projectId"
+				WHERE sc."credentialsId" = $1 AND pr."userId" = $2 AND sc.role IN ('credential:owner', 'credential:user')
+				LIMIT 1;
+			`
+			var allowed int
+			if err := tx.QueryRow(ctx, checkPermissionQuery, credID, user.ID).Scan(&allowed); err != nil {
+				h.log.Info("skipping credential auto-share: user lacks permission", "credentialId", credID, "userId", user.ID)
+				continue
+			}
+
+			// Upsert credential:user for target projects in ShareWithIds
+			for _, targetPID := range payload.ShareWithIds {
+				targetPID = strings.TrimSpace(targetPID)
+				if targetPID == "" || targetPID == ownerPID {
+					continue
+				}
+				const insCredQuery = `
+					INSERT INTO shared_credentials ("credentialsId", "projectId", role, "createdAt", "updatedAt")
+					VALUES ($1, $2, 'credential:user', NOW(), NOW())
+					ON CONFLICT ("credentialsId", "projectId") DO NOTHING;
+				`
+				if _, err := tx.Exec(ctx, insCredQuery, credID, targetPID); err != nil {
+					h.log.Error("auto-insert credential share failed", "credentialId", credID, "projectId", targetPID, "err", err)
+					http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+					return
+				}
+			}
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		h.log.Error("commit shares failed", "err", err)
+		h.log.Error("commit workflow shares failed", "err", err)
 		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -234,10 +282,255 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("workflow sharing updated successfully",
 		"workflowId", workflowID, "user", user.Email, "sharedWith", payload.ShareWithIds)
 
+	// 6. Respond with expected n8n response: {"data": null}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"data":null}`))
+}
+
+func (h *Handler) handleCredentialShare(w http.ResponseWriter, r *http.Request, credentialID string) {
+	// 1. Authenticate calling user against n8n /rest/login
+	user, err := h.authenticate(r)
+	if err != nil {
+		h.log.Warn("credential share request unauthenticated", "credentialId", credentialID, "err", err)
+		http.Error(w, `{"status":"error","message":"Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// 2. Parse payload
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"failed to read body"}`, http.StatusBadRequest)
+		return
+	}
+	var payload sharePayload
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		http.Error(w, `{"status":"error","message":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 3. Verify credential ownership in n8n_db (user must be owner)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	const checkOwnerQuery = `
+		SELECT sc."projectId"
+		FROM shared_credentials sc
+		JOIN project_relation pr ON sc."projectId" = pr."projectId"
+		WHERE sc."credentialsId" = $1 AND pr."userId" = $2 AND sc.role = 'credential:owner';
+	`
+	var ownerPID string
+	err = h.pool.QueryRow(ctx, checkOwnerQuery, credentialID, user.ID).Scan(&ownerPID)
+	if err != nil {
+		h.log.Warn("user lacks permission to share credential", "credentialId", credentialID, "userId", user.ID, "err", err)
+		http.Error(w, `{"status":"error","message":"Forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	// 4. Update shared_credentials table transactionally
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		h.log.Error("begin tx failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	// Fetch current user shares (role = 'credential:user')
+	const currentQuery = `
+		SELECT "projectId"
+		FROM shared_credentials
+		WHERE "credentialsId" = $1 AND role = 'credential:user';
+	`
+	rows, err := tx.Query(ctx, currentQuery, credentialID)
+	if err != nil {
+		h.log.Error("query current credential shares failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+	var currentUsers []string
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err == nil {
+			currentUsers = append(currentUsers, pid)
+		}
+	}
+	rows.Close()
+
+	toAdd, toDelete := diffShares(currentUsers, payload.ShareWithIds, ownerPID)
+
+	// Delete unshared (only role = 'credential:user')
+	if len(toDelete) > 0 {
+		const delQuery = `
+			DELETE FROM shared_credentials
+			WHERE "credentialsId" = $1 AND role = 'credential:user' AND "projectId" = ANY($2);
+		`
+		if _, err := tx.Exec(ctx, delQuery, credentialID, toDelete); err != nil {
+			h.log.Error("delete credential shares failed", "err", err)
+			http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Insert new shares (credential:user)
+	for _, newPID := range toAdd {
+		const insQuery = `
+			INSERT INTO shared_credentials ("credentialsId", "projectId", role, "createdAt", "updatedAt")
+			VALUES ($1, $2, 'credential:user', NOW(), NOW())
+			ON CONFLICT ("credentialsId", "projectId") DO NOTHING;
+		`
+		if _, err := tx.Exec(ctx, insQuery, credentialID, newPID); err != nil {
+			h.log.Error("insert credential share failed", "projectId", newPID, "err", err)
+			http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		h.log.Error("commit credential shares failed", "err", err)
+		http.Error(w, `{"status":"error","message":"Database error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	h.log.Info("credential sharing updated successfully",
+		"credentialId", credentialID, "user", user.Email, "sharedWith", payload.ShareWithIds)
+
 	// 5. Respond with expected n8n response: {"data": null}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"data":null}`))
+}
+
+// diffShares computes which project IDs need to be added and which need to be removed.
+// ownerPID is excluded from both toAdd and toDelete to ensure owner records are never touched.
+func diffShares(current []string, desired []string, ownerPID string) (toAdd []string, toDelete []string) {
+	ownerPID = strings.TrimSpace(ownerPID)
+	desiredMap := make(map[string]bool)
+	for _, id := range desired {
+		id = strings.TrimSpace(id)
+		if id != "" && id != ownerPID {
+			desiredMap[id] = true
+		}
+	}
+
+	currentMap := make(map[string]bool)
+	for _, id := range current {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			currentMap[id] = true
+		}
+	}
+
+	for _, cur := range current {
+		cur = strings.TrimSpace(cur)
+		if cur != "" && cur != ownerPID && !desiredMap[cur] {
+			toDelete = append(toDelete, cur)
+		}
+	}
+
+	for des := range desiredMap {
+		if !currentMap[des] {
+			toAdd = append(toAdd, des)
+		}
+	}
+
+	sort.Strings(toAdd)
+	sort.Strings(toDelete)
+	return toAdd, toDelete
+}
+
+// extractCredentialIDs parses workflow nodes JSON and extracts all credential IDs.
+func extractCredentialIDs(data []byte) []string {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil
+	}
+
+	// Handle stringified JSON (e.g. if stored as a JSON-encoded string)
+	if len(data) > 0 && data[0] == '"' {
+		var unquoted string
+		if err := json.Unmarshal(data, &unquoted); err == nil {
+			data = bytes.TrimSpace([]byte(unquoted))
+		}
+	}
+
+	type nodeStruct struct {
+		Credentials map[string]struct {
+			ID any `json:"id"`
+		} `json:"credentials"`
+	}
+
+	var nodes []nodeStruct
+	if err := json.Unmarshal(data, &nodes); err != nil {
+		var wrapper struct {
+			Nodes []nodeStruct `json:"nodes"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 == nil {
+			nodes = wrapper.Nodes
+		} else {
+			return nil
+		}
+	}
+
+	seen := make(map[string]bool)
+	var credIDs []string
+
+	for _, node := range nodes {
+		for _, cred := range node.Credentials {
+			if cred.ID == nil {
+				continue
+			}
+			var idStr string
+			switch v := cred.ID.(type) {
+			case string:
+				idStr = strings.TrimSpace(v)
+			case float64:
+				idStr = fmt.Sprintf("%.0f", v)
+			default:
+				idStr = strings.TrimSpace(fmt.Sprintf("%v", v))
+			}
+			if idStr != "" && idStr != "<nil>" && !seen[idStr] {
+				seen[idStr] = true
+				credIDs = append(credIDs, idStr)
+			}
+		}
+	}
+	sort.Strings(credIDs)
+	return credIDs
+}
+
+func isCredentialSharePath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) >= 3 && parts[0] == "rest" && parts[1] == "credentials" && parts[len(parts)-1] == "share"
+}
+
+func isWorkflowSharePath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) >= 3 && parts[0] == "rest" && parts[1] == "workflows" && parts[len(parts)-1] == "share"
+}
+
+func extractCredentialPathID(r *http.Request) string {
+	if id := r.PathValue("credentialId"); id != "" {
+		return id
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "rest" && parts[1] == "credentials" && parts[len(parts)-1] == "share" {
+		return parts[2]
+	}
+	return ""
+}
+
+func extractWorkflowPathID(r *http.Request) string {
+	if id := r.PathValue("workflowId"); id != "" {
+		return id
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "rest" && parts[1] == "workflows" && parts[len(parts)-1] == "share" {
+		return parts[2]
+	}
+	return ""
 }
 
 func (h *Handler) authenticate(r *http.Request) (*userInfo, error) {
